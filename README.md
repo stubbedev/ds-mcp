@@ -11,7 +11,7 @@ and [mongodb-mcp](https://github.com/stubbedev/mongodb-mcp) servers.
 ## Install
 
 ```sh
-brew install stubbedev/tap/ds-mcp   # macOS / Linux
+brew install stubbedev/ds-mcp/ds-mcp # macOS / Linux
 cargo install --path . --locked     # from a checkout (or: just install)
 nix build .#default                 # via the flake
 ```
