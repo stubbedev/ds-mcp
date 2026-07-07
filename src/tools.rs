@@ -1,8 +1,10 @@
-//! The MCP tool surface. All failures are tool results (is_error), never
-//! protocol errors, so the model always sees the message.
+//! The MCP tool surface: five engine-agnostic tools. `query`/`execute` take
+//! an engine-native payload (SQL string, Mongo command document, Redis
+//! command array) and dispatch internally. All failures are tool results
+//! (is_error), never protocol errors, so the model always sees the message.
 
-// Helpers deliberately use Result<T, CallToolResult> so `?`-style early
-// returns produce the error tool result; the Err size is irrelevant here.
+// Helpers use Result<T, CallToolResult> so `?`-style early returns produce
+// the error tool result; the Err size is irrelevant here.
 #![allow(clippy::result_large_err)]
 
 use std::sync::Arc;
@@ -19,10 +21,10 @@ use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{RoleServer, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::registry::{Registry, Resolver};
-use crate::source::mongo::MongoSource;
-use crate::source::sql::SqlSource;
+use crate::source::Source;
 
 #[derive(Clone)]
 pub struct DsServer {
@@ -60,160 +62,41 @@ pub struct SourceArg {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct ListTablesArgs {
+pub struct SchemaArgs {
     pub source: String,
-    /// Database/schema to list; defaults to the source's configured database.
+    /// Database/schema to inspect; defaults to the source's configured one.
     pub database: Option<String>,
+    /// Table/collection (SQL/mongo) or key (redis) to describe. Omit to list
+    /// what the source contains.
+    pub table: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct DescribeTableArgs {
+pub struct QueryArgs {
     pub source: String,
-    pub table: String,
-    /// Database/schema of the table; defaults to the source's configured database.
+    /// The read to run, in the source's native form:
+    /// - SQL engines: a single SELECT/SHOW/DESCRIBE/EXPLAIN string.
+    /// - MongoDB: a command document, e.g. {"find": "widgets", "filter": {"qty": {"$gte": 1}}}
+    ///   or {"aggregate": "widgets", "pipeline": [...]}. Extended JSON is honored.
+    /// - Redis: a command array, e.g. ["GET", "widget:1"].
+    pub query: Value,
+    /// Database for MongoDB commands; defaults to the source's default_database.
     pub database: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct ReadQueryArgs {
-    pub source: String,
-    /// A single read-only SQL statement (SELECT/SHOW/DESCRIBE/EXPLAIN).
-    pub sql: String,
-    /// Maximum rows to return. Default 1000.
+    /// Max rows/documents to return (SQL + Mongo find/aggregate). Default 1000.
     pub limit: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct SqlArgs {
+pub struct ExecuteArgs {
     pub source: String,
-    pub sql: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct DatabaseArgs {
-    pub source: String,
-    /// Database; defaults to the source's default_database.
+    /// The write to run, in the source's native form:
+    /// - SQL engines: any statement (INSERT/UPDATE/DELETE/CREATE/ALTER/...).
+    /// - MongoDB: a command document, e.g. {"insert": "widgets", "documents": [...]},
+    ///   {"update": ...}, {"delete": ...}, {"createIndexes": ...}, {"drop": ...}.
+    /// - Redis: a command array, e.g. ["SET", "widget:1", "sprocket"].
+    pub query: Value,
+    /// Database for MongoDB commands; defaults to the source's default_database.
     pub database: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct CollectionArgs {
-    pub source: String,
-    pub collection: String,
-    /// Database; defaults to the source's default_database.
-    pub database: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct FilterArgs {
-    pub source: String,
-    pub collection: String,
-    pub database: Option<String>,
-    /// Extended JSON filter object. Omit to match everything.
-    pub filter: Option<serde_json::Value>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct FindArgs {
-    pub source: String,
-    pub collection: String,
-    pub database: Option<String>,
-    /// Extended JSON filter object. Omit to match everything.
-    pub filter: Option<serde_json::Value>,
-    /// Extended JSON projection object.
-    pub projection: Option<serde_json::Value>,
-    /// Extended JSON sort object, e.g. {"created_at": -1}.
-    pub sort: Option<serde_json::Value>,
-    /// Maximum documents to return. Default 1000.
-    pub limit: Option<usize>,
-    pub skip: Option<u64>,
-    /// Return the query plan instead of executing.
-    pub explain: Option<bool>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct AggregateArgs {
-    pub source: String,
-    pub collection: String,
-    pub database: Option<String>,
-    /// Extended JSON array of pipeline stages.
-    pub pipeline: serde_json::Value,
-    /// Maximum documents to return (read pipelines only). Default 1000.
-    pub limit: Option<usize>,
-    /// Return the query plan instead of executing.
-    pub explain: Option<bool>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct DistinctArgs {
-    pub source: String,
-    pub collection: String,
-    pub database: Option<String>,
-    /// Field to collect distinct values of.
-    pub field: String,
-    pub filter: Option<serde_json::Value>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct InsertArgs {
-    pub source: String,
-    pub collection: String,
-    pub database: Option<String>,
-    /// Extended JSON array of documents to insert.
-    pub documents: serde_json::Value,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct UpdateArgs {
-    pub source: String,
-    pub collection: String,
-    pub database: Option<String>,
-    /// Extended JSON filter selecting the documents to update.
-    pub filter: serde_json::Value,
-    /// Extended JSON update document (update operators like $set).
-    pub update: serde_json::Value,
-    /// Update all matching documents instead of the first. Default false.
-    pub many: Option<bool>,
-    /// Insert if nothing matches. Default false.
-    pub upsert: Option<bool>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct DeleteArgs {
-    pub source: String,
-    pub collection: String,
-    pub database: Option<String>,
-    /// Extended JSON filter selecting the documents to delete. Must be non-empty.
-    pub filter: serde_json::Value,
-    /// Delete all matching documents instead of the first. Default false.
-    pub many: Option<bool>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct CreateIndexArgs {
-    pub source: String,
-    pub collection: String,
-    pub database: Option<String>,
-    /// Extended JSON index keys, e.g. {"email": 1}.
-    pub keys: serde_json::Value,
-    pub unique: Option<bool>,
-    pub name: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct DropIndexArgs {
-    pub source: String,
-    pub collection: String,
-    pub database: Option<String>,
-    /// Index name to drop.
-    pub name: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct RedisCommandArgs {
-    pub source: String,
-    /// Command and arguments as an array, e.g. ["HGETALL", "user:1"].
-    pub command: Vec<String>,
 }
 
 impl DsServer {
@@ -293,7 +176,7 @@ impl DsServer {
         &self,
         ctx: &RequestContext<RoleServer>,
         name: &str,
-    ) -> Result<(Arc<crate::source::Source>, Duration), CallToolResult> {
+    ) -> Result<(Arc<Source>, Duration), CallToolResult> {
         let reg = self.registry(ctx).await.map_err(err)?;
         let src = reg.get(name).map(Arc::clone).map_err(err)?;
         Ok((src, reg.query_timeout))
@@ -327,65 +210,40 @@ macro_rules! src {
     };
 }
 
-fn as_sql<'a>(src: &'a crate::source::Source, name: &str) -> Result<&'a SqlSource, CallToolResult> {
-    src.as_sql(name).map_err(err)
+/// A SQL payload must be a string.
+fn as_sql_string(v: &Value, engine: &str) -> Result<String, CallToolResult> {
+    v.as_str().map(str::to_owned).ok_or_else(|| {
+        err(format!(
+            "{engine} is a SQL source; `query` must be a SQL statement string"
+        ))
+    })
 }
 
-fn as_mongo<'a>(
-    src: &'a crate::source::Source,
-    name: &str,
-) -> Result<&'a MongoSource, CallToolResult> {
-    src.as_mongo(name).map_err(err)
-}
-
-/// A mongo source that also accepts writes.
-fn writable_mongo<'a>(
-    src: &'a crate::source::Source,
-    name: &str,
-) -> Result<&'a MongoSource, CallToolResult> {
-    let m = as_mongo(src, name)?;
-    if m.readonly() {
-        return Err(err(format!("source {name:?} is read-only")));
-    }
-    Ok(m)
-}
-
-/// Optional Extended JSON object argument; None means empty document.
-fn opt_doc(v: Option<serde_json::Value>) -> Result<bson::Document, CallToolResult> {
-    match v {
-        None => Ok(bson::Document::new()),
-        Some(v) => crate::source::mongo::to_doc(v).map_err(|e| err(format!("{e:#}"))),
-    }
-}
-
-/// Optional Extended JSON object argument, kept optional.
-fn opt_doc_opt(v: Option<serde_json::Value>) -> Result<Option<bson::Document>, CallToolResult> {
-    v.map(|v| crate::source::mongo::to_doc(v).map_err(|e| err(format!("{e:#}"))))
-        .transpose()
-}
-
-fn req_doc(v: serde_json::Value, what: &str) -> Result<bson::Document, CallToolResult> {
-    crate::source::mongo::to_doc(v).map_err(|e| err(format!("{what}: {e:#}")))
-}
-
-/// Extended JSON array of objects (pipeline stages, documents to insert).
-fn doc_array(v: serde_json::Value) -> Result<Vec<bson::Document>, CallToolResult> {
-    let serde_json::Value::Array(items) = v else {
-        return Err(err("expected a JSON array"));
+/// A Redis payload must be an array of string/number/bool args.
+fn as_redis_parts(v: Value) -> Result<Vec<String>, CallToolResult> {
+    let Value::Array(items) = v else {
+        return Err(err(
+            "redis sources take a command array, e.g. [\"GET\", \"key\"]",
+        ));
     };
     items
         .into_iter()
-        .map(|item| crate::source::mongo::to_doc(item).map_err(|e| err(format!("{e:#}"))))
+        .map(|e| match e {
+            Value::String(s) => Ok(s),
+            Value::Number(n) => Ok(n.to_string()),
+            Value::Bool(b) => Ok(b.to_string()),
+            _ => Err(err("redis command arguments must be strings or numbers")),
+        })
         .collect()
 }
 
-macro_rules! unwrap_or_return {
-    ($e:expr) => {
-        match $e {
-            Ok(v) => v,
-            Err(r) => return r,
-        }
-    };
+/// A Mongo payload must be a command document.
+fn as_mongo_command(v: Value) -> Result<bson::Document, CallToolResult> {
+    crate::source::mongo::to_doc(v).map_err(|e| {
+        err(format!(
+            "mongodb sources take a command document, e.g. {{\"find\": \"coll\", \"filter\": {{}}}} ({e:#})"
+        ))
+    })
 }
 
 #[tool_router]
@@ -414,11 +272,11 @@ impl DsServer {
         let start = std::time::Instant::now();
         self.run(timeout, async move {
             match src.as_ref() {
-                crate::source::Source::Sql(s) => {
+                Source::Sql(s) => {
                     s.query("SELECT 1", 1).await?;
                 }
-                crate::source::Source::Mongo(m) => m.ping().await?,
-                crate::source::Source::Redis(r) => r.ping().await?,
+                Source::Mongo(m) => m.ping().await?,
+                Source::Redis(r) => r.ping().await?,
             }
             Ok(serde_json::json!({
                 "ok": true,
@@ -429,34 +287,77 @@ impl DsServer {
     }
 
     #[tool(
-        description = "List databases/schemas available on a source (any engine).",
+        description = "Introspect a source. Without `table`: list tables/collections (SQL/mongo) or the keyspace (redis). With `table`: describe its columns (SQL), indexes (mongo), or a key's type and ttl (redis).",
         annotations(read_only_hint = true)
     )]
-    async fn list_databases(
+    async fn schema(
         &self,
-        Parameters(args): Parameters<SourceArg>,
+        Parameters(args): Parameters<SchemaArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let (src, timeout) = src!(self, ctx, args.source);
+        self.run(
+            timeout,
+            src.schema(args.database.as_deref(), args.table.as_deref()),
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Run a read against a source. `query` is engine-native: a SQL SELECT/SHOW/DESCRIBE/EXPLAIN string; a MongoDB command document like {\"find\": \"c\", \"filter\": {...}} or {\"aggregate\": \"c\", \"pipeline\": [...]}; or a Redis command array like [\"GET\", \"k\"]. Writes are refused here (use execute). Results are capped at `limit` rows/documents with a truncated/has_more flag; paginate with LIMIT/OFFSET (SQL) or skip/limit (mongo).",
+        annotations(read_only_hint = true)
+    )]
+    async fn query(
+        &self,
+        Parameters(args): Parameters<QueryArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
+        let limit = args.limit.unwrap_or(DEFAULT_ROW_LIMIT);
         match src.as_ref() {
-            crate::source::Source::Sql(sql) => {
+            Source::Sql(s) => {
+                let sql = match as_sql_string(&args.query, s.engine().name()) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+                if let Err(e) = crate::sqlguard::ensure_read_only(s.engine(), &sql) {
+                    return err(e);
+                }
+                self.run(timeout, s.query(&sql, limit)).await
+            }
+            Source::Mongo(m) => {
+                let cmd = match as_mongo_command(args.query) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+                match crate::source::mongo::command_is_read(&cmd) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return err(
+                            "that command writes (or aggregates with $out/$merge); use execute",
+                        );
+                    }
+                    Err(e) => return err(format!("{e:#}")),
+                }
                 self.run(
                     timeout,
-                    sql.query(sql.list_databases_sql(), DEFAULT_ROW_LIMIT),
+                    m.run_command(args.database.as_deref(), cmd, Some(limit)),
                 )
                 .await
             }
-            crate::source::Source::Mongo(m) => {
+            Source::Redis(r) => {
+                let parts = match as_redis_parts(args.query) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+                let Some(first) = parts.first() else {
+                    return err("command is empty");
+                };
+                if !crate::source::redis::is_read_command(first) {
+                    return err(format!("{first} is not a read command; use execute"));
+                }
                 self.run(timeout, async move {
-                    let names = m.list_databases().await?;
-                    Ok(serde_json::json!({"values": names}))
-                })
-                .await
-            }
-            crate::source::Source::Redis(r) => {
-                self.run(timeout, async move {
-                    let info = r.command(&["INFO".into(), "keyspace".into()]).await?;
-                    Ok(serde_json::json!({"keyspace": info}))
+                    Ok(serde_json::json!({"result": r.command(&parts).await?}))
                 })
                 .await
             }
@@ -464,440 +365,48 @@ impl DsServer {
     }
 
     #[tool(
-        description = "List tables on a SQL source.",
-        annotations(read_only_hint = true)
-    )]
-    async fn list_tables(
-        &self,
-        Parameters(args): Parameters<ListTablesArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let sql = unwrap_or_return!(as_sql(&src, &args.source));
-        let stmt = sql.list_tables_sql(args.database.as_deref());
-        self.run(timeout, sql.query(&stmt, DEFAULT_ROW_LIMIT)).await
-    }
-
-    #[tool(
-        description = "Describe the columns of a table on a SQL source.",
-        annotations(read_only_hint = true)
-    )]
-    async fn describe_table(
-        &self,
-        Parameters(args): Parameters<DescribeTableArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let sql = unwrap_or_return!(as_sql(&src, &args.source));
-        let stmt = sql.describe_table_sql(&args.table, args.database.as_deref());
-        self.run(timeout, sql.query(&stmt, DEFAULT_ROW_LIMIT)).await
-    }
-
-    #[tool(
-        description = "Run a single read-only SQL statement (SELECT/SHOW/DESCRIBE/EXPLAIN) on a SQL source. Results are capped at `limit` rows with a truncated flag; paginate large results with LIMIT/OFFSET in the SQL.",
-        annotations(read_only_hint = true)
-    )]
-    async fn read_query(
-        &self,
-        Parameters(args): Parameters<ReadQueryArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let sql = unwrap_or_return!(as_sql(&src, &args.source));
-        if let Err(e) = crate::sqlguard::ensure_read_only(sql.engine(), &args.sql) {
-            return err(e);
-        }
-        let limit = args.limit.unwrap_or(DEFAULT_ROW_LIMIT);
-        self.run(timeout, sql.query(&args.sql, limit)).await
-    }
-
-    #[tool(
-        description = "Run a write/DDL SQL statement (INSERT/UPDATE/DELETE/CREATE/ALTER/...) on a writable SQL source.",
+        description = "Run a write against a writable source. `query` is engine-native: any SQL statement (INSERT/UPDATE/DELETE/CREATE/ALTER/CREATE INDEX/...); a MongoDB command document like {\"insert\": ...}, {\"update\": ...}, {\"delete\": ...}, {\"createIndexes\": ...}, {\"drop\": ...}; or a Redis command array like [\"SET\", \"k\", \"v\"]. Refused on read-only sources. No implicit guards — a DELETE without a filter deletes everything.",
         annotations(destructive_hint = true)
     )]
-    async fn write_query(
+    async fn execute(
         &self,
-        Parameters(args): Parameters<SqlArgs>,
+        Parameters(args): Parameters<ExecuteArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let (src, timeout) = src!(self, ctx, args.source);
-        let sql = unwrap_or_return!(as_sql(&src, &args.source));
-        if sql.readonly() {
+        if src.readonly() {
             return err(format!("source {:?} is read-only", args.source));
         }
-        self.run(timeout, sql.exec(&args.sql)).await
-    }
-
-    #[tool(
-        description = "Show the query plan for a SQL statement without executing it.",
-        annotations(read_only_hint = true)
-    )]
-    async fn explain_query(
-        &self,
-        Parameters(args): Parameters<SqlArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let sql = unwrap_or_return!(as_sql(&src, &args.source));
-        self.run(timeout, sql.explain(&args.sql, DEFAULT_ROW_LIMIT))
-            .await
-    }
-
-    // ── Document tools (mongodb) ────────────────────────────────────────
-
-    #[tool(
-        description = "Query documents in a MongoDB collection. filter/projection/sort are Extended JSON objects.",
-        annotations(read_only_hint = true)
-    )]
-    async fn find(
-        &self,
-        Parameters(args): Parameters<FindArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let m = unwrap_or_return!(as_mongo(&src, &args.source));
-        let filter = unwrap_or_return!(opt_doc(args.filter));
-        let projection = unwrap_or_return!(opt_doc_opt(args.projection));
-        let sort = unwrap_or_return!(opt_doc_opt(args.sort));
-        let limit = args.limit.unwrap_or(DEFAULT_ROW_LIMIT);
-        if args.explain.unwrap_or(false) {
-            let mut cmd =
-                bson::doc! {"find": &args.collection, "filter": filter, "limit": limit as i64};
-            if let Some(p) = projection {
-                cmd.insert("projection", p);
+        match src.as_ref() {
+            Source::Sql(s) => {
+                let sql = match as_sql_string(&args.query, s.engine().name()) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+                self.run(timeout, s.exec(&sql)).await
             }
-            if let Some(so) = sort {
-                cmd.insert("sort", so);
+            Source::Mongo(m) => {
+                let cmd = match as_mongo_command(args.query) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+                self.run(timeout, m.run_command(args.database.as_deref(), cmd, None))
+                    .await
             }
-            if let Some(sk) = args.skip {
-                cmd.insert("skip", sk as i64);
+            Source::Redis(r) => {
+                let parts = match as_redis_parts(args.query) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+                if parts.is_empty() {
+                    return err("command is empty");
+                }
+                self.run(timeout, async move {
+                    Ok(serde_json::json!({"result": r.command(&parts).await?}))
+                })
+                .await
             }
-            return self
-                .run(timeout, m.explain(args.database.as_deref(), cmd))
-                .await;
         }
-        self.run(
-            timeout,
-            m.find(
-                args.database.as_deref(),
-                &args.collection,
-                filter,
-                projection,
-                sort,
-                limit,
-                args.skip,
-            ),
-        )
-        .await
-    }
-
-    #[tool(
-        description = "Run an aggregation pipeline on a MongoDB collection. pipeline is an Extended JSON array of stages; $out/$merge require a writable source.",
-        annotations(read_only_hint = true)
-    )]
-    async fn aggregate(
-        &self,
-        Parameters(args): Parameters<AggregateArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let m = unwrap_or_return!(as_mongo(&src, &args.source));
-        let pipeline = unwrap_or_return!(doc_array(args.pipeline));
-        if crate::source::mongo::MongoSource::pipeline_writes(&pipeline) && m.readonly() {
-            return err(format!(
-                "pipeline contains $out/$merge but source {:?} is read-only",
-                args.source
-            ));
-        }
-        let limit = args.limit.unwrap_or(DEFAULT_ROW_LIMIT);
-        if args.explain.unwrap_or(false) {
-            let cmd = bson::doc! {
-                "aggregate": &args.collection,
-                "pipeline": pipeline,
-                "cursor": {},
-            };
-            return self
-                .run(timeout, m.explain(args.database.as_deref(), cmd))
-                .await;
-        }
-        self.run(
-            timeout,
-            m.aggregate(args.database.as_deref(), &args.collection, pipeline, limit),
-        )
-        .await
-    }
-
-    #[tool(
-        description = "Count documents in a MongoDB collection matching a filter.",
-        annotations(read_only_hint = true)
-    )]
-    async fn count(
-        &self,
-        Parameters(args): Parameters<FilterArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let m = unwrap_or_return!(as_mongo(&src, &args.source));
-        let filter = unwrap_or_return!(opt_doc(args.filter));
-        self.run(timeout, async move {
-            let count = m
-                .count(args.database.as_deref(), &args.collection, filter)
-                .await?;
-            Ok(serde_json::json!({"count": count}))
-        })
-        .await
-    }
-
-    #[tool(
-        description = "List distinct values of a field in a MongoDB collection.",
-        annotations(read_only_hint = true)
-    )]
-    async fn distinct(
-        &self,
-        Parameters(args): Parameters<DistinctArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let m = unwrap_or_return!(as_mongo(&src, &args.source));
-        let filter = unwrap_or_return!(opt_doc(args.filter));
-        self.run(timeout, async move {
-            let values = m
-                .distinct(
-                    args.database.as_deref(),
-                    &args.collection,
-                    &args.field,
-                    filter,
-                )
-                .await?;
-            Ok(serde_json::json!({"values": values}))
-        })
-        .await
-    }
-
-    #[tool(
-        description = "List collections in a MongoDB database.",
-        annotations(read_only_hint = true)
-    )]
-    async fn list_collections(
-        &self,
-        Parameters(args): Parameters<DatabaseArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let m = unwrap_or_return!(as_mongo(&src, &args.source));
-        self.run(timeout, async move {
-            let names = m.list_collections(args.database.as_deref()).await?;
-            Ok(serde_json::json!({"collections": names}))
-        })
-        .await
-    }
-
-    #[tool(
-        description = "List indexes on a MongoDB collection.",
-        annotations(read_only_hint = true)
-    )]
-    async fn list_indexes(
-        &self,
-        Parameters(args): Parameters<CollectionArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let m = unwrap_or_return!(as_mongo(&src, &args.source));
-        self.run(timeout, async move {
-            let indexes = m
-                .list_indexes(args.database.as_deref(), &args.collection)
-                .await?;
-            Ok(serde_json::json!({"indexes": indexes}))
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Insert one or more documents into a MongoDB collection. documents is an Extended JSON array."
-    )]
-    async fn insert(
-        &self,
-        Parameters(args): Parameters<InsertArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let m = unwrap_or_return!(writable_mongo(&src, &args.source));
-        let documents = unwrap_or_return!(doc_array(args.documents));
-        if documents.is_empty() {
-            return err("documents is empty");
-        }
-        self.run(timeout, async move {
-            let ids = m
-                .insert(args.database.as_deref(), &args.collection, documents)
-                .await?;
-            Ok(serde_json::json!({"inserted_ids": ids}))
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Update documents in a MongoDB collection. Updates one document unless many=true.",
-        annotations(destructive_hint = true)
-    )]
-    async fn update(
-        &self,
-        Parameters(args): Parameters<UpdateArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let m = unwrap_or_return!(writable_mongo(&src, &args.source));
-        let filter = unwrap_or_return!(req_doc(args.filter, "filter"));
-        let update = unwrap_or_return!(req_doc(args.update, "update"));
-        self.run(
-            timeout,
-            m.update(
-                args.database.as_deref(),
-                &args.collection,
-                filter,
-                update,
-                args.many.unwrap_or(false),
-                args.upsert.unwrap_or(false),
-            ),
-        )
-        .await
-    }
-
-    #[tool(
-        description = "Delete documents from a MongoDB collection. Deletes one document unless many=true. filter must be non-empty.",
-        annotations(destructive_hint = true)
-    )]
-    async fn delete(
-        &self,
-        Parameters(args): Parameters<DeleteArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let m = unwrap_or_return!(writable_mongo(&src, &args.source));
-        let filter = unwrap_or_return!(req_doc(args.filter, "filter"));
-        if filter.is_empty() {
-            return err(
-                "refusing to delete with an empty filter; pass an explicit filter \
-                 (or drop_collection to remove everything)",
-            );
-        }
-        self.run(
-            timeout,
-            m.delete(
-                args.database.as_deref(),
-                &args.collection,
-                filter,
-                args.many.unwrap_or(false),
-            ),
-        )
-        .await
-    }
-
-    #[tool(description = "Create an index on a MongoDB collection.")]
-    async fn create_index(
-        &self,
-        Parameters(args): Parameters<CreateIndexArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let m = unwrap_or_return!(writable_mongo(&src, &args.source));
-        let keys = unwrap_or_return!(req_doc(args.keys, "keys"));
-        self.run(timeout, async move {
-            let name = m
-                .create_index(
-                    args.database.as_deref(),
-                    &args.collection,
-                    keys,
-                    args.unique.unwrap_or(false),
-                    args.name,
-                )
-                .await?;
-            Ok(serde_json::json!({"name": name}))
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Drop an index from a MongoDB collection.",
-        annotations(destructive_hint = true)
-    )]
-    async fn drop_index(
-        &self,
-        Parameters(args): Parameters<DropIndexArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let m = unwrap_or_return!(writable_mongo(&src, &args.source));
-        self.run(timeout, async move {
-            m.drop_index(args.database.as_deref(), &args.collection, &args.name)
-                .await?;
-            Ok(serde_json::json!({"dropped": args.name}))
-        })
-        .await
-    }
-
-    #[tool(description = "Create a collection in a MongoDB database.")]
-    async fn create_collection(
-        &self,
-        Parameters(args): Parameters<CollectionArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let m = unwrap_or_return!(writable_mongo(&src, &args.source));
-        self.run(timeout, async move {
-            m.create_collection(args.database.as_deref(), &args.collection)
-                .await?;
-            Ok(serde_json::json!({"created": args.collection}))
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Run a Redis command, e.g. [\"HGETALL\", \"user:1\"]. On read-only sources only read commands (GET/SCAN/HGETALL/...) are allowed.",
-        annotations(destructive_hint = true)
-    )]
-    async fn redis_command(
-        &self,
-        Parameters(args): Parameters<RedisCommandArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let r = match src.as_redis(&args.source) {
-            Ok(r) => r,
-            Err(e) => return err(e),
-        };
-        let Some(first) = args.command.first() else {
-            return err("command is empty");
-        };
-        if r.readonly() && !crate::source::redis::is_read_command(first) {
-            return err(format!(
-                "{first} is not a read command and source {:?} is read-only",
-                args.source
-            ));
-        }
-        self.run(timeout, async move {
-            let value = r.command(&args.command).await?;
-            Ok(serde_json::json!({"result": value}))
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Drop a MongoDB collection and all its documents.",
-        annotations(destructive_hint = true)
-    )]
-    async fn drop_collection(
-        &self,
-        Parameters(args): Parameters<CollectionArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let (src, timeout) = src!(self, ctx, args.source);
-        let m = unwrap_or_return!(writable_mongo(&src, &args.source));
-        self.run(timeout, async move {
-            m.drop_collection(args.database.as_deref(), &args.collection)
-                .await?;
-            Ok(serde_json::json!({"dropped": args.collection}))
-        })
-        .await
     }
 }
 
@@ -925,7 +434,7 @@ impl ServerHandler for DsServer {
                     format!("{}-schema", info.name),
                 )
                 .with_description(format!(
-                    "Schema overview of source {:?} ({}): tables and columns",
+                    "Schema overview of source {:?} ({})",
                     info.name, info.engine
                 ))
                 .with_mime_type("application/json")
@@ -960,7 +469,7 @@ impl ServerHandler for DsServer {
             .get(name)
             .map(Arc::clone)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
-        let schema = tokio::time::timeout(reg.query_timeout, src.schema())
+        let schema = tokio::time::timeout(reg.query_timeout, src.schema(None, None))
             .await
             .map_err(|_| ErrorData::internal_error("schema read timed out", None))?
             .map_err(|e| ErrorData::internal_error(format!("{e:#}"), None))?;
@@ -979,9 +488,11 @@ impl ServerHandler for DsServer {
                 .build(),
         )
         .with_instructions(
-            "DataStore MCP exposes named database sources (SQL and document engines). \
-                 Start with list_sources to see what is available, then use the SQL tools \
-                 (read_query, list_tables, ...) against SQL sources.",
+            "DataStore MCP exposes named database sources across SQL, document and \
+             key-value engines through one tool set. Call list_sources first, then \
+             schema to introspect, and query/execute to read/write. The query payload \
+             is engine-native: a SQL string, a MongoDB command document, or a Redis \
+             command array.",
         )
     }
 }

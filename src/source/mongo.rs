@@ -1,12 +1,12 @@
-//! MongoDB sources. Filters/documents arrive as JSON tool arguments and are
-//! interpreted as MongoDB Extended JSON (so {"$oid": ...} etc. work).
+//! MongoDB sources. The tool layer sends runCommand-style command documents
+//! (e.g. {"find": "c", "filter": {...}}); they are interpreted as MongoDB
+//! Extended JSON so {"$oid": ...} etc. work.
 
 use anyhow::{Context, Result, bail};
 use bson::{Bson, Document};
 use futures_util::TryStreamExt;
-use mongodb::options::{ClientOptions, IndexOptions};
+use mongodb::options::ClientOptions;
 use mongodb::{Client, Collection, Database, IndexModel};
-use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 
@@ -21,23 +21,64 @@ pub struct MongoSource {
     tunnel: OnceCell<super::ssh::SshTunnel>,
 }
 
-#[derive(Serialize)]
-pub struct DocsOut {
-    pub documents: Vec<Value>,
-    pub count: usize,
-    pub has_more: bool,
-}
+/// Commands that only read. The first key of a command document names it.
+/// `aggregate` is read unless its pipeline writes ($out/$merge).
+const READ_COMMANDS: &[&str] = &[
+    "find",
+    "aggregate",
+    "count",
+    "distinct",
+    "listcollections",
+    "listindexes",
+    "listdatabases",
+    "dbstats",
+    "collstats",
+    "estimateddocumentcount",
+    "explain",
+    "ping",
+    "hello",
+    "ismaster",
+    "buildinfo",
+    "serverstatus",
+    "connectionstatus",
+    "getmore",
+    "geosearch",
+];
 
 /// Convert a JSON tool argument to a BSON document (Extended JSON aware).
 pub fn to_doc(v: Value) -> Result<Document> {
     match Bson::try_from(v).context("invalid Extended JSON")? {
         Bson::Document(d) => Ok(d),
-        other => bail!("expected a JSON object, got {}", other.element_type() as u8),
+        _ => bail!("expected a JSON object"),
     }
 }
 
 fn doc_to_json(d: Document) -> Value {
     Bson::Document(d).into_relaxed_extjson()
+}
+
+/// Is this command document a read? Err on an empty document.
+pub fn command_is_read(cmd: &Document) -> Result<bool> {
+    let name = cmd
+        .keys()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("empty command document"))?
+        .to_ascii_lowercase();
+    if name == "aggregate" {
+        if let Ok(pipeline) = cmd.get_array("pipeline")
+            && pipeline.iter().any(stage_writes)
+        {
+            return Ok(false);
+        }
+        return Ok(true);
+    }
+    Ok(READ_COMMANDS.contains(&name.as_str()))
+}
+
+fn stage_writes(stage: &Bson) -> bool {
+    stage
+        .as_document()
+        .is_some_and(|d| d.contains_key("$out") || d.contains_key("$merge"))
 }
 
 impl MongoSource {
@@ -136,30 +177,38 @@ impl MongoSource {
         Ok(self.db(database).await?.collection(collection))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn find(
+    /// Run a command document. When `cap` is Some and the command is
+    /// find/aggregate, a limit is injected and the cursor is normalized to
+    /// {documents, count, has_more}; every other command returns its raw
+    /// result document.
+    pub async fn run_command(
         &self,
         database: Option<&str>,
-        collection: &str,
-        filter: Document,
-        projection: Option<Document>,
-        sort: Option<Document>,
-        limit: usize,
-        skip: Option<u64>,
-    ) -> Result<DocsOut> {
-        let coll = self.coll(database, collection).await?;
-        let mut find = coll.find(filter).limit((limit + 1) as i64);
-        if let Some(p) = projection {
-            find = find.projection(p);
+        mut cmd: Document,
+        cap: Option<usize>,
+    ) -> Result<Value> {
+        let db = self.db(database).await?;
+        let name = cmd
+            .keys()
+            .next()
+            .map(|k| k.to_ascii_lowercase())
+            .unwrap_or_default();
+        match (cap, name.as_str()) {
+            (Some(limit), "find") => {
+                cmd.insert("limit", (limit + 1) as i64);
+                Ok(cursor_docs(db.run_command(cmd).await?, limit))
+            }
+            (Some(limit), "aggregate") => {
+                if !cmd.contains_key("cursor") {
+                    cmd.insert("cursor", Document::new());
+                }
+                if let Ok(pipeline) = cmd.get_array_mut("pipeline") {
+                    pipeline.push(Bson::Document(bson::doc! {"$limit": (limit + 1) as i64}));
+                }
+                Ok(cursor_docs(db.run_command(cmd).await?, limit))
+            }
+            _ => Ok(doc_to_json(db.run_command(cmd).await?)),
         }
-        if let Some(s) = sort {
-            find = find.sort(s);
-        }
-        if let Some(s) = skip {
-            find = find.skip(s);
-        }
-        let docs: Vec<Document> = find.await?.try_collect().await?;
-        Ok(docs_out(docs, limit))
     }
 
     pub async fn ping(&self) -> Result<()> {
@@ -169,71 +218,6 @@ impl MongoSource {
             .run_command(bson::doc! {"ping": 1})
             .await?;
         Ok(())
-    }
-
-    /// Explain a find or aggregate command without executing it.
-    pub async fn explain(&self, database: Option<&str>, command: Document) -> Result<Value> {
-        let db = self.db(database).await?;
-        let result = db
-            .run_command(bson::doc! {"explain": command, "verbosity": "queryPlanner"})
-            .await?;
-        Ok(doc_to_json(result))
-    }
-
-    /// Pipelines containing $out/$merge write; the caller gates those on
-    /// readonly sources.
-    pub fn pipeline_writes(pipeline: &[Document]) -> bool {
-        pipeline
-            .iter()
-            .any(|stage| stage.contains_key("$out") || stage.contains_key("$merge"))
-    }
-
-    pub async fn aggregate(
-        &self,
-        database: Option<&str>,
-        collection: &str,
-        mut pipeline: Vec<Document>,
-        limit: usize,
-    ) -> Result<DocsOut> {
-        let coll = self.coll(database, collection).await?;
-        let writes = Self::pipeline_writes(&pipeline);
-        if !writes {
-            pipeline.push(bson::doc! {"$limit": (limit + 1) as i64});
-        }
-        let docs: Vec<Document> = coll.aggregate(pipeline).await?.try_collect().await?;
-        Ok(docs_out(docs, limit))
-    }
-
-    pub async fn count(
-        &self,
-        database: Option<&str>,
-        collection: &str,
-        filter: Document,
-    ) -> Result<u64> {
-        Ok(self
-            .coll(database, collection)
-            .await?
-            .count_documents(filter)
-            .await?)
-    }
-
-    pub async fn distinct(
-        &self,
-        database: Option<&str>,
-        collection: &str,
-        field: &str,
-        filter: Document,
-    ) -> Result<Vec<Value>> {
-        let values = self
-            .coll(database, collection)
-            .await?
-            .distinct(field, filter)
-            .await?;
-        Ok(values.into_iter().map(Bson::into_relaxed_extjson).collect())
-    }
-
-    pub async fn list_databases(&self) -> Result<Vec<String>> {
-        Ok(self.client().await?.list_database_names().await?)
     }
 
     pub async fn list_collections(&self, database: Option<&str>) -> Result<Vec<String>> {
@@ -263,112 +247,25 @@ impl MongoSource {
             })
             .collect())
     }
-
-    pub async fn insert(
-        &self,
-        database: Option<&str>,
-        collection: &str,
-        documents: Vec<Document>,
-    ) -> Result<Vec<Value>> {
-        let result = self
-            .coll(database, collection)
-            .await?
-            .insert_many(documents)
-            .await?;
-        let mut ids: Vec<_> = result.inserted_ids.into_iter().collect();
-        ids.sort_by_key(|(i, _)| *i);
-        Ok(ids
-            .into_iter()
-            .map(|(_, id)| id.into_relaxed_extjson())
-            .collect())
-    }
-
-    pub async fn update(
-        &self,
-        database: Option<&str>,
-        collection: &str,
-        filter: Document,
-        update: Document,
-        many: bool,
-        upsert: bool,
-    ) -> Result<Value> {
-        let coll = self.coll(database, collection).await?;
-        let result = if many {
-            coll.update_many(filter, update).upsert(upsert).await?
-        } else {
-            coll.update_one(filter, update).upsert(upsert).await?
-        };
-        Ok(serde_json::json!({
-            "matched": result.matched_count,
-            "modified": result.modified_count,
-            "upserted_id": result.upserted_id.map(Bson::into_relaxed_extjson),
-        }))
-    }
-
-    pub async fn delete(
-        &self,
-        database: Option<&str>,
-        collection: &str,
-        filter: Document,
-        many: bool,
-    ) -> Result<Value> {
-        let coll = self.coll(database, collection).await?;
-        let result = if many {
-            coll.delete_many(filter).await?
-        } else {
-            coll.delete_one(filter).await?
-        };
-        Ok(serde_json::json!({"deleted": result.deleted_count}))
-    }
-
-    pub async fn create_index(
-        &self,
-        database: Option<&str>,
-        collection: &str,
-        keys: Document,
-        unique: bool,
-        name: Option<String>,
-    ) -> Result<String> {
-        let options = IndexOptions::builder().unique(unique).name(name).build();
-        let model = IndexModel::builder().keys(keys).options(options).build();
-        let result = self
-            .coll(database, collection)
-            .await?
-            .create_index(model)
-            .await?;
-        Ok(result.index_name)
-    }
-
-    pub async fn drop_index(
-        &self,
-        database: Option<&str>,
-        collection: &str,
-        name: &str,
-    ) -> Result<()> {
-        Ok(self
-            .coll(database, collection)
-            .await?
-            .drop_index(name)
-            .await?)
-    }
-
-    pub async fn create_collection(&self, database: Option<&str>, name: &str) -> Result<()> {
-        Ok(self.db(database).await?.create_collection(name).await?)
-    }
-
-    pub async fn drop_collection(&self, database: Option<&str>, collection: &str) -> Result<()> {
-        Ok(self.coll(database, collection).await?.drop().await?)
-    }
 }
 
-fn docs_out(mut docs: Vec<Document>, limit: usize) -> DocsOut {
+/// Extract `cursor.firstBatch` from a find/aggregate result, applying the
+/// row cap (the command fetched limit+1 to detect more).
+fn cursor_docs(result: Document, limit: usize) -> Value {
+    let batch = result
+        .get_document("cursor")
+        .ok()
+        .and_then(|c| c.get_array("firstBatch").ok())
+        .cloned()
+        .unwrap_or_default();
+    let mut docs: Vec<Value> = batch.into_iter().map(Bson::into_relaxed_extjson).collect();
     let has_more = docs.len() > limit;
     docs.truncate(limit);
-    DocsOut {
-        count: docs.len(),
-        documents: docs.into_iter().map(doc_to_json).collect(),
-        has_more,
-    }
+    serde_json::json!({
+        "documents": docs,
+        "count": docs.len(),
+        "has_more": has_more,
+    })
 }
 
 #[cfg(test)]
@@ -376,13 +273,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pipeline_write_detection() {
-        let read: Vec<Document> = vec![bson::doc! {"$match": {"a": 1}}];
-        assert!(!MongoSource::pipeline_writes(&read));
-        let out: Vec<Document> = vec![bson::doc! {"$match": {}}, bson::doc! {"$out": "target"}];
-        assert!(MongoSource::pipeline_writes(&out));
-        let merge: Vec<Document> = vec![bson::doc! {"$merge": {"into": "t"}}];
-        assert!(MongoSource::pipeline_writes(&merge));
+    fn classifies_read_vs_write() {
+        let read = |d: Document| command_is_read(&d).unwrap();
+        assert!(read(bson::doc! {"find": "t", "filter": {}}));
+        assert!(read(bson::doc! {"count": "t"}));
+        assert!(read(
+            bson::doc! {"aggregate": "t", "pipeline": [{"$match": {}}]}
+        ));
+        assert!(!read(bson::doc! {"insert": "t", "documents": []}));
+        assert!(!read(bson::doc! {"update": "t"}));
+        assert!(!read(bson::doc! {"delete": "t"}));
+        assert!(!read(bson::doc! {"createIndexes": "t"}));
+        assert!(!read(
+            bson::doc! {"aggregate": "t", "pipeline": [{"$out": "dest"}]}
+        ));
+        assert!(command_is_read(&Document::new()).is_err());
     }
 
     #[test]

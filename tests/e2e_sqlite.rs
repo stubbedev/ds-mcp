@@ -106,27 +106,27 @@ fn duckdb_end_to_end() {
         &[
             call(
                 1,
-                "write_query",
+                "execute",
                 json!({"source": "duck",
-                "sql": "CREATE TABLE widgets(id INTEGER, name TEXT, price DECIMAL(8,2), added DATE)"}),
+                "query": "CREATE TABLE widgets(id INTEGER, name TEXT, price DECIMAL(8,2), added DATE)"}),
             ),
             call(
                 2,
-                "write_query",
+                "execute",
                 json!({"source": "duck",
-                "sql": "INSERT INTO widgets VALUES (1, 'sprocket', 9.95, DATE '2026-01-02')"}),
+                "query": "INSERT INTO widgets VALUES (1, 'sprocket', 9.95, DATE '2026-01-02')"}),
             ),
             call(
                 3,
-                "read_query",
+                "query",
                 json!({"source": "duck",
-                "sql": "SELECT id, name, price, added FROM widgets"}),
+                "query": "SELECT id, name, price, added FROM widgets"}),
             ),
-            call(4, "list_tables", json!({"source": "duck"})),
+            call(4, "schema", json!({"source": "duck"})),
             call(
                 5,
-                "read_query",
-                json!({"source": "duck", "sql": "DROP TABLE widgets"}),
+                "query",
+                json!({"source": "duck", "query": "DROP TABLE widgets"}),
             ),
         ],
     );
@@ -142,7 +142,7 @@ fn duckdb_end_to_end() {
     assert!(!is_error && text.contains("widgets"), "{text}");
 
     let (_, is_error) = tool_result(&responses, 5);
-    assert!(is_error, "DROP via read_query must be rejected");
+    assert!(is_error, "DROP via query must be rejected");
 }
 
 #[test]
@@ -168,39 +168,39 @@ fn sqlite_end_to_end() {
         &[
             call(
                 1,
-                "write_query",
+                "execute",
                 json!({"source": "demo",
-                "sql": "CREATE TABLE IF NOT EXISTS widgets(id INTEGER PRIMARY KEY, name TEXT)"}),
+                "query": "CREATE TABLE IF NOT EXISTS widgets(id INTEGER PRIMARY KEY, name TEXT)"}),
             ),
             call(
                 2,
-                "write_query",
+                "execute",
                 json!({"source": "demo",
-                "sql": "INSERT INTO widgets(name) VALUES ('sprocket')"}),
+                "query": "INSERT INTO widgets(name) VALUES ('sprocket')"}),
             ),
             call(
                 3,
-                "read_query",
+                "query",
                 json!({"source": "demo",
-                "sql": "SELECT id, name FROM widgets"}),
+                "query": "SELECT id, name FROM widgets"}),
             ),
             call(
                 4,
-                "read_query",
-                json!({"source": "demo", "sql": "DROP TABLE widgets"}),
+                "query",
+                json!({"source": "demo", "query": "DROP TABLE widgets"}),
             ),
             call(
                 5,
-                "write_query",
+                "execute",
                 json!({"source": "demo_ro",
-                "sql": "INSERT INTO widgets(name) VALUES ('nope')"}),
+                "query": "INSERT INTO widgets(name) VALUES ('nope')"}),
             ),
             call(6, "list_sources", json!({})),
-            call(7, "list_tables", json!({"source": "demo"})),
+            call(7, "schema", json!({"source": "demo"})),
             call(
                 8,
-                "read_query",
-                json!({"source": "missing", "sql": "SELECT 1"}),
+                "query",
+                json!({"source": "missing", "query": "SELECT 1"}),
             ),
         ],
     );
@@ -220,8 +220,8 @@ fn sqlite_end_to_end() {
     assert_eq!(rs["truncated"], json!(false), "{text}");
 
     let (text, is_error) = tool_result(&responses, 4);
-    assert!(is_error, "DROP via read_query must be rejected");
-    assert!(text.contains("write_query"), "{text}");
+    assert!(is_error, "DROP via query must be rejected");
+    assert!(text.contains("execute"), "{text}");
 
     let (text, is_error) = tool_result(&responses, 5);
     assert!(is_error, "write on readonly source must be rejected");

@@ -98,28 +98,44 @@ setups.
 
 ## Tools
 
-Every tool takes a `source` argument naming a configured source; errors come
-back as tool results the model can read. Reads are capped at 1000 rows/docs
-with a truncated flag.
+Five tools cover every engine — the payload is engine-native and each tool
+dispatches internally:
 
-| | |
+| tool | what |
 |---|---|
-| any engine | `list_sources`, `list_databases`, `ping` |
-| SQL (mysql/mariadb/postgres/sqlite/duckdb/mssql/clickhouse) | `list_tables`, `describe_table`, `read_query`, `write_query`, `explain_query` |
-| MongoDB | `find`, `aggregate` (both take `explain: true` for query plans), `count`, `distinct`, `list_collections`, `list_indexes`, `insert`, `update`, `delete`, `create_index`, `drop_index`, `create_collection`, `drop_collection` |
-| Redis | `redis_command` (raw command array; read-only sources allow only read commands) |
+| `list_sources` | list configured sources: name, engine, description, readonly, remote |
+| `ping` | check connectivity + latency for a source |
+| `schema` | introspect: list tables/collections (or keyspace); with `table`, describe columns/indexes (or a key's type + ttl) |
+| `query` | run a **read** |
+| `execute` | run a **write** (refused on read-only sources) |
 
-`read_query` accepts a single SELECT/SHOW/DESCRIBE/EXPLAIN statement,
-enforced with a real SQL parser — anything else (or anything unparseable) is
-rejected and pointed at `write_query`, which in turn refuses read-only
-sources. Mongo write tools do the same; `aggregate` pipelines containing
-`$out`/`$merge` count as writes, and `delete` refuses an empty filter.
-MongoDB filter/document arguments are Extended JSON, so `{"$oid": ...}` and
-friends work.
+`query` and `execute` take a `query` argument in the source's native form:
 
+| engine | `query` payload | example |
+|---|---|---|
+| SQL (mysql/mariadb/postgres/sqlite/duckdb/mssql/clickhouse) | a statement string | `"SELECT * FROM t WHERE id = 1"` |
+| MongoDB | a runCommand document (Extended JSON) | `{"find": "t", "filter": {"id": 1}}` |
+| Redis | a command array | `["GET", "k"]` |
+
+Read/write is enforced per engine: SQL through a real parser (only
+SELECT/SHOW/DESCRIBE/EXPLAIN pass `query`); MongoDB by command name (find /
+aggregate / count / ... are reads; insert / update / delete / createIndexes /
+drop / ... are writes, and aggregate with `$out`/`$merge` counts as a write);
+Redis by a read-command allowlist. Anything that writes is rejected from
+`query` and pointed at `execute`. `execute` runs the payload verbatim on
+writable sources — no implicit guards, so a `DELETE` without a filter deletes
+everything, exactly as that engine's shell would.
+
+Reads are capped at `limit` rows/documents (default 1000) with a
+`truncated`/`has_more` flag; paginate with LIMIT/OFFSET (SQL) or skip/limit
+(mongo). MongoDB find/aggregate results are normalized to
+`{documents, count, has_more}`; other commands return their raw result.
 Results come back as text and as MCP `structuredContent`. Each source also
-exposes an MCP resource `ds://<source>/schema` with a tables-and-columns
-overview (collections for mongo, keyspace for redis).
+exposes an MCP resource `ds://<source>/schema`.
+
+Index/collection creation is just a write: `execute` with
+`CREATE INDEX ...` (SQL) or `{"createIndexes": ...}` / `{"create": ...}`
+(mongo).
 
 ## Develop
 

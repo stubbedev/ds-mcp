@@ -1,4 +1,4 @@
-//! SQL-family sources: mysql/mariadb, postgres, sqlite, mssql.
+//! SQL-family sources: mysql/mariadb, postgres, sqlite, duckdb, mssql, clickhouse.
 //! One lazily-connected pool per source; rows are decoded to JSON with a
 //! per-engine try-decode chain (sqlx has no generic runtime decode).
 
@@ -363,50 +363,6 @@ impl SqlSource {
         })
     }
 
-    /// EXPLAIN. MSSQL has no EXPLAIN prefix; it needs SHOWPLAN_ALL toggled
-    /// around the statement on one connection.
-    pub async fn explain(&self, sql: &str, limit: usize) -> Result<ResultSet> {
-        if self.engine() != EngineKind::Mssql {
-            return self.query(&self.explain_sql(sql), limit).await;
-        }
-        let SqlPool::Mssql(p) = self.pool().await? else {
-            unreachable!()
-        };
-        let mut conn = p.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        conn.simple_query("SET SHOWPLAN_ALL ON")
-            .await?
-            .into_results()
-            .await?;
-        let collected = mssql_collect(&mut conn, sql, limit + 1).await;
-        // Always turn SHOWPLAN back off — the connection returns to the pool.
-        let off = conn.simple_query("SET SHOWPLAN_ALL OFF").await;
-        if let Ok(stream) = off {
-            let _ = stream.into_results().await;
-        }
-        let (columns, mut rows) = collected?;
-        let truncated = rows.len() > limit;
-        rows.truncate(limit);
-        Ok(ResultSet {
-            columns,
-            row_count: rows.len(),
-            rows,
-            truncated,
-        })
-    }
-
-    pub fn list_databases_sql(&self) -> &'static str {
-        match self.engine() {
-            EngineKind::MySql | EngineKind::MariaDb => "SHOW DATABASES",
-            EngineKind::Postgres => {
-                "SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY datname"
-            }
-            EngineKind::Sqlite | EngineKind::DuckDb => "PRAGMA database_list",
-            EngineKind::Mssql => "SELECT name FROM sys.databases ORDER BY name",
-            EngineKind::ClickHouse => "SHOW DATABASES",
-            EngineKind::Redis | EngineKind::MongoDb => unreachable!(),
-        }
-    }
-
     pub fn list_tables_sql(&self, database: Option<&str>) -> String {
         let db = database.or(self.cfg.database.as_deref());
         match self.engine() {
@@ -495,13 +451,6 @@ impl SqlSource {
                 )
             }
             EngineKind::Redis | EngineKind::MongoDb => unreachable!(),
-        }
-    }
-
-    pub fn explain_sql(&self, sql: &str) -> String {
-        match self.engine() {
-            EngineKind::Sqlite => format!("EXPLAIN QUERY PLAN {sql}"),
-            _ => format!("EXPLAIN {sql}"),
         }
     }
 }

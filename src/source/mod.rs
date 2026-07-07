@@ -49,46 +49,11 @@ impl Source {
         }
     }
 
-    pub fn as_sql(&self, name: &str) -> Result<&sql::SqlSource, String> {
+    pub fn readonly(&self) -> bool {
         match self {
-            Source::Sql(s) => Ok(s),
-            Source::Mongo(_) => Err(format!(
-                "source {name:?} is engine mongodb; use the document tools \
-                 (find, aggregate, count, ...)"
-            )),
-            Source::Redis(_) => Err(format!(
-                "source {name:?} is engine redis; use the redis_command tool"
-            )),
-        }
-    }
-
-    pub fn as_mongo(&self, name: &str) -> Result<&mongo::MongoSource, String> {
-        match self {
-            Source::Mongo(s) => Ok(s),
-            Source::Sql(s) => Err(format!(
-                "source {name:?} is engine {}; use the SQL tools \
-                 (read_query, list_tables, ...)",
-                s.engine().name()
-            )),
-            Source::Redis(_) => Err(format!(
-                "source {name:?} is engine redis; use the redis_command tool"
-            )),
-        }
-    }
-
-    pub fn as_redis(&self, name: &str) -> Result<&redis::RedisSource, String> {
-        match self {
-            Source::Redis(s) => Ok(s),
-            other => {
-                let engine = match other {
-                    Source::Sql(s) => s.engine().name(),
-                    Source::Mongo(_) => "mongodb",
-                    Source::Redis(_) => unreachable!(),
-                };
-                Err(format!(
-                    "source {name:?} is engine {engine}; redis_command only works on redis sources"
-                ))
-            }
+            Source::Sql(s) => s.readonly(),
+            Source::Mongo(s) => s.readonly(),
+            Source::Redis(s) => s.readonly(),
         }
     }
 
@@ -100,50 +65,51 @@ impl Source {
         }
     }
 
-    /// Schema overview for the MCP resource `ds://{name}/schema`: tables with
-    /// their columns (SQL) or collection names (mongo). Capped at 100 tables.
-    pub async fn schema(&self) -> anyhow::Result<serde_json::Value> {
+    /// Introspection for the `schema` tool and the `ds://{name}/schema`
+    /// resource. Without `table`: list tables/collections (SQL/mongo) or the
+    /// keyspace (redis). With `table`: describe columns (SQL), indexes
+    /// (mongo), or a key's type + ttl (redis).
+    pub async fn schema(
+        &self,
+        database: Option<&str>,
+        table: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        use serde_json::json;
         match self {
-            Source::Sql(s) => {
-                let tables_rs = s.query(&s.list_tables_sql(None), 1000).await?;
-                let mut tables = Vec::new();
-                for row in &tables_rs.rows {
-                    // Table name is the last column of every engine's listing
-                    // (mysql/sqlite: 1 col; pg/mssql: schema, name).
-                    let Some(name) = row.last().and_then(|v| v.as_str()) else {
-                        continue;
-                    };
-                    let cols = s.query(&s.describe_table_sql(name, None), 200).await?;
-                    tables.push(serde_json::json!({
-                        "name": name,
-                        "columns": cols.columns,
-                        "rows": cols.rows,
-                    }));
-                    if tables.len() >= 100 {
-                        break;
-                    }
-                }
-                Ok(serde_json::json!({
+            Source::Sql(s) => Ok(match table {
+                Some(t) => json!({
                     "engine": s.engine().name(),
-                    "tables": tables,
-                }))
-            }
-            Source::Mongo(m) => {
-                let collections = m.list_collections(None).await?;
-                Ok(serde_json::json!({
+                    "table": t,
+                    "columns": s.query(&s.describe_table_sql(t, database), 500).await?,
+                }),
+                None => json!({
+                    "engine": s.engine().name(),
+                    "tables": s.query(&s.list_tables_sql(database), 1000).await?,
+                }),
+            }),
+            Source::Mongo(m) => Ok(match table {
+                Some(c) => json!({
                     "engine": "mongodb",
-                    "collections": collections,
-                    "hint": "use find/list_indexes tools to inspect documents",
-                }))
-            }
-            Source::Redis(r) => {
-                let info = r.command(&["INFO".into(), "keyspace".into()]).await?;
-                Ok(serde_json::json!({
+                    "collection": c,
+                    "indexes": m.list_indexes(database, c).await?,
+                }),
+                None => json!({
+                    "engine": "mongodb",
+                    "collections": m.list_collections(database).await?,
+                }),
+            }),
+            Source::Redis(r) => Ok(match table {
+                Some(key) => json!({
                     "engine": "redis",
-                    "keyspace": info,
-                    "hint": "use the redis_command tool (SCAN, TYPE, ...) to inspect keys",
-                }))
-            }
+                    "key": key,
+                    "type": r.command(&["TYPE".into(), key.into()]).await?,
+                    "ttl": r.command(&["TTL".into(), key.into()]).await?,
+                }),
+                None => json!({
+                    "engine": "redis",
+                    "keyspace": r.command(&["INFO".into(), "keyspace".into()]).await?,
+                }),
+            }),
         }
     }
 }

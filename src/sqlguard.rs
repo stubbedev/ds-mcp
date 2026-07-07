@@ -1,7 +1,7 @@
 //! Classifies SQL as read-only with a real parser, not string prefixes.
 //! Policy (same as the Go sqlguard): exactly one statement, and it must be a
 //! SELECT / SHOW / DESCRIBE / EXPLAIN. Anything that fails to parse is
-//! rejected — the safe direction; write_query is the escape hatch.
+//! rejected — the safe direction; execute is the escape hatch.
 
 use sqlparser::ast::Statement;
 use sqlparser::dialect::{
@@ -27,7 +27,7 @@ fn dialect(kind: EngineKind) -> Box<dyn Dialect> {
 
 pub fn ensure_read_only(kind: EngineKind, sql: &str) -> Result<(), String> {
     let statements = Parser::parse_sql(dialect(kind).as_ref(), sql)
-        .map_err(|e| format!("query is not parseable as read-only SQL ({e}); use write_query on a writable source if this is intentional"))?;
+        .map_err(|e| format!("query is not parseable as read-only SQL ({e}); use execute on a writable source if this is intentional"))?;
     match statements.as_slice() {
         [] => Err("empty query".into()),
         [stmt] => ensure_stmt_read_only(stmt),
@@ -42,7 +42,7 @@ fn ensure_stmt_read_only(stmt: &Statement) -> Result<(), String> {
             if let sqlparser::ast::SetExpr::Select(s) = q.body.as_ref()
                 && s.into.is_some()
             {
-                return Err("SELECT INTO writes; use write_query".into());
+                return Err("SELECT INTO writes; use execute".into());
             }
             Ok(())
         }
@@ -60,7 +60,7 @@ fn ensure_stmt_read_only(stmt: &Statement) -> Result<(), String> {
         | Statement::ShowViews { .. }
         | Statement::ShowObjects { .. } => Ok(()),
         other => Err(format!(
-            "statement is not read-only ({}); use write_query",
+            "statement is not read-only ({}); use execute",
             stmt_kind(other)
         )),
     }
