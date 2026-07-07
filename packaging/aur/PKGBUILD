@@ -12,8 +12,8 @@ provides=('ds-mcp')
 conflicts=('ds-mcp')
 source_x86_64=("$url/releases/download/v$pkgver/ds-mcp_v${pkgver}_x86_64-unknown-linux-gnu.tar.gz")
 source_aarch64=("$url/releases/download/v$pkgver/ds-mcp_v${pkgver}_aarch64-unknown-linux-gnu.tar.gz")
-sha256sums_x86_64=('SKIP')
-sha256sums_aarch64=('SKIP')
+sha256sums_x86_64=('2c15ea7155a90c866252aa053f0379eee5cc72fb7b978aacbc01dc3542f31959')
+sha256sums_aarch64=('722b451f6133f0e258f29e30bbbc8fd512e5ef88e6b03087273de9fa63c680fe')
 
 package() {
   install -Dm755 ds-mcp "$pkgdir/usr/bin/ds-mcp"

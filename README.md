@@ -11,12 +11,14 @@ and [mongodb-mcp](https://github.com/stubbedev/mongodb-mcp) servers.
 ## Install
 
 ```sh
-cargo install --path . --locked   # or: just install
-nix build .#default               # or via the flake
+brew install stubbedev/tap/ds-mcp   # macOS / Linux
+cargo install --path . --locked     # from a checkout (or: just install)
+nix build .#default                 # via the flake
 ```
 
 Prebuilt binaries for linux/macos/windows are attached to
-[GitHub releases](../../releases).
+[GitHub releases](../../releases); an AUR PKGBUILD lives in
+[packaging/aur](packaging/aur).
 
 ## Configure
 
