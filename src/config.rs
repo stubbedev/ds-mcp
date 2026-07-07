@@ -78,7 +78,10 @@ pub enum EngineKind {
     MariaDb,
     Postgres,
     Sqlite,
+    DuckDb,
     Mssql,
+    ClickHouse,
+    Redis,
     MongoDb,
 }
 
@@ -89,7 +92,10 @@ impl EngineKind {
             EngineKind::MariaDb => "mariadb",
             EngineKind::Postgres => "postgres",
             EngineKind::Sqlite => "sqlite",
+            EngineKind::DuckDb => "duckdb",
             EngineKind::Mssql => "mssql",
+            EngineKind::ClickHouse => "clickhouse",
+            EngineKind::Redis => "redis",
             EngineKind::MongoDb => "mongodb",
         }
     }
@@ -116,7 +122,7 @@ pub struct SourceConfig {
     /// Password. Supports `${ENV_VAR}` expansion.
     pub password: Option<String>,
     pub database: Option<String>,
-    /// Database file path (sqlite only). Supports `~` expansion.
+    /// Database file path (sqlite/duckdb only). Supports `~` expansion.
     pub path: Option<String>,
     /// Default database for document tools (mongodb only).
     pub default_database: Option<String>,
@@ -259,12 +265,12 @@ fn validate(cfg: &Config) -> Result<()> {
 
 fn validate_source(src: &SourceConfig) -> Result<()> {
     match src.engine {
-        EngineKind::Sqlite => {
+        EngineKind::Sqlite | EngineKind::DuckDb => {
             if src.path.is_none() && src.dsn.is_none() {
-                bail!("sqlite needs `path` (or a sqlite:// dsn)");
+                bail!("{} needs `path`", src.engine.name());
             }
             if src.ssh.is_some() {
-                bail!("sqlite is a local file; ssh makes no sense");
+                bail!("{} is a local file; ssh makes no sense", src.engine.name());
             }
         }
         EngineKind::MongoDb => {
@@ -284,8 +290,8 @@ fn validate_source(src: &SourceConfig) -> Result<()> {
             }
         }
     }
-    if src.engine != EngineKind::Sqlite && src.path.is_some() {
-        bail!("`path` is sqlite-only");
+    if !matches!(src.engine, EngineKind::Sqlite | EngineKind::DuckDb) && src.path.is_some() {
+        bail!("`path` is only for file engines (sqlite, duckdb)");
     }
     if src.engine != EngineKind::MongoDb && src.default_database.is_some() {
         bail!("`default_database` is mongodb-only; use `database`");

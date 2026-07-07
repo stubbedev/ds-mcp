@@ -1,0 +1,7 @@
+# Stop the cc crate from adding its own dynamic -lstdc++ for duckdb's bundled
+# C++ engine on linux; build.rs links libstdc++ statically instead so the
+# binary runs on hosts without a global libstdc++ (NixOS, scratch containers).
+# macOS (libc++, always present) and MSVC are unaffected.
+[env]
+CXXSTDLIB_x86_64-unknown-linux-gnu = ""
+CXXSTDLIB_aarch64-unknown-linux-gnu = ""

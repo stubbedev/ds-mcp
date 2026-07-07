@@ -1,8 +1,9 @@
 # DataStore MCP
 
 One MCP server for many databases. `ds-mcp` exposes named data sources —
-MySQL/MariaDB, PostgreSQL, SQLite, SQL Server and MongoDB — to MCP clients
-over stdio or streamable HTTP, behind a single unified tool surface.
+MySQL/MariaDB, PostgreSQL, SQLite, DuckDB, SQL Server, ClickHouse, MongoDB
+and Redis — to MCP clients over stdio or streamable HTTP, behind a single
+unified tool surface.
 
 It replaces the separate [mysql-mcp](https://github.com/stubbedev/mysql-mcp)
 and [mongodb-mcp](https://github.com/stubbedev/mongodb-mcp) servers.
@@ -38,10 +39,10 @@ generated [config.schema.json](config.schema.json).
 }
 ```
 
-Per source: `engine` (`mysql` | `mariadb` | `postgres` | `sqlite` | `mssql` |
-`mongodb`), discrete `host`/`port`/`user`/`password`/`database` fields or a
+Per source: `engine` (`mysql` | `mariadb` | `postgres` | `sqlite` | `duckdb` |
+`mssql` | `clickhouse` | `redis` | `mongodb`), discrete `host`/`port`/`user`/`password`/`database` fields or a
 full `dsn` (alias `uri`), `readonly`, a `description` the model uses to pick
-the right source, `path` for sqlite files, `default_database` for mongo, and
+the right source, `path` for sqlite/duckdb files, `default_database` for mongo, and
 an optional `ssh` tunnel:
 
 ```json
@@ -95,9 +96,10 @@ with a truncated flag.
 
 | | |
 |---|---|
-| any engine | `list_sources`, `list_databases` |
-| SQL | `list_tables`, `describe_table`, `read_query`, `write_query`, `explain_query` |
-| MongoDB | `find`, `aggregate`, `count`, `distinct`, `list_collections`, `list_indexes`, `insert`, `update`, `delete`, `create_index`, `drop_index`, `create_collection`, `drop_collection` |
+| any engine | `list_sources`, `list_databases`, `ping` |
+| SQL (mysql/mariadb/postgres/sqlite/duckdb/mssql/clickhouse) | `list_tables`, `describe_table`, `read_query`, `write_query`, `explain_query` |
+| MongoDB | `find`, `aggregate` (both take `explain: true` for query plans), `count`, `distinct`, `list_collections`, `list_indexes`, `insert`, `update`, `delete`, `create_index`, `drop_index`, `create_collection`, `drop_collection` |
+| Redis | `redis_command` (raw command array; read-only sources allow only read commands) |
 
 `read_query` accepts a single SELECT/SHOW/DESCRIBE/EXPLAIN statement,
 enforced with a real SQL parser — anything else (or anything unparseable) is
@@ -106,6 +108,10 @@ sources. Mongo write tools do the same; `aggregate` pipelines containing
 `$out`/`$merge` count as writes, and `delete` refuses an empty filter.
 MongoDB filter/document arguments are Extended JSON, so `{"$oid": ...}` and
 friends work.
+
+Results come back as text and as MCP `structuredContent`. Each source also
+exposes an MCP resource `ds://<source>/schema` with a tables-and-columns
+overview (collections for mongo, keyspace for redis).
 
 ## Develop
 

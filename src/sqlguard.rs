@@ -5,7 +5,8 @@
 
 use sqlparser::ast::Statement;
 use sqlparser::dialect::{
-    Dialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+    ClickHouseDialect, Dialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect,
+    PostgreSqlDialect, SQLiteDialect,
 };
 use sqlparser::parser::Parser;
 
@@ -16,8 +17,11 @@ fn dialect(kind: EngineKind) -> Box<dyn Dialect> {
         EngineKind::MySql | EngineKind::MariaDb => Box::new(MySqlDialect {}),
         EngineKind::Postgres => Box::new(PostgreSqlDialect {}),
         EngineKind::Sqlite => Box::new(SQLiteDialect {}),
+        EngineKind::DuckDb => Box::new(DuckDbDialect {}),
         EngineKind::Mssql => Box::new(MsSqlDialect {}),
-        EngineKind::MongoDb => Box::new(GenericDialect {}), // unreachable in practice
+        EngineKind::ClickHouse => Box::new(ClickHouseDialect {}),
+        // unreachable in practice
+        EngineKind::Redis | EngineKind::MongoDb => Box::new(GenericDialect {}),
     }
 }
 

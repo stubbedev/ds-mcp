@@ -2,6 +2,7 @@
 //! engines and document stores. New engine = new variant + match arms.
 
 pub mod mongo;
+pub mod redis;
 pub mod sql;
 pub mod ssh;
 
@@ -12,12 +13,18 @@ use crate::config::{EngineKind, SourceConfig};
 pub enum Source {
     Sql(sql::SqlSource),
     Mongo(mongo::MongoSource),
+    Redis(redis::RedisSource),
 }
 
 impl Source {
     pub fn new(name: &str, cfg: SourceConfig, force_readonly: bool) -> anyhow::Result<Self> {
         match cfg.engine {
             EngineKind::MongoDb => Ok(Source::Mongo(mongo::MongoSource::new(
+                name,
+                cfg,
+                force_readonly,
+            ))),
+            EngineKind::Redis => Ok(Source::Redis(redis::RedisSource::new(
                 name,
                 cfg,
                 force_readonly,
@@ -30,6 +37,7 @@ impl Source {
         let (engine, cfg, readonly) = match self {
             Source::Sql(s) => (s.engine(), s.config(), s.readonly()),
             Source::Mongo(s) => (s.engine(), s.config(), s.readonly()),
+            Source::Redis(s) => (s.engine(), s.config(), s.readonly()),
         };
         SourceInfo {
             name: name.to_string(),
@@ -47,6 +55,9 @@ impl Source {
                 "source {name:?} is engine mongodb; use the document tools \
                  (find, aggregate, count, ...)"
             )),
+            Source::Redis(_) => Err(format!(
+                "source {name:?} is engine redis; use the redis_command tool"
+            )),
         }
     }
 
@@ -58,6 +69,25 @@ impl Source {
                  (read_query, list_tables, ...)",
                 s.engine().name()
             )),
+            Source::Redis(_) => Err(format!(
+                "source {name:?} is engine redis; use the redis_command tool"
+            )),
+        }
+    }
+
+    pub fn as_redis(&self, name: &str) -> Result<&redis::RedisSource, String> {
+        match self {
+            Source::Redis(s) => Ok(s),
+            other => {
+                let engine = match other {
+                    Source::Sql(s) => s.engine().name(),
+                    Source::Mongo(_) => "mongodb",
+                    Source::Redis(_) => unreachable!(),
+                };
+                Err(format!(
+                    "source {name:?} is engine {engine}; redis_command only works on redis sources"
+                ))
+            }
         }
     }
 
@@ -65,6 +95,54 @@ impl Source {
         match self {
             Source::Sql(s) => s.close().await,
             Source::Mongo(s) => s.close().await,
+            Source::Redis(s) => s.close().await,
+        }
+    }
+
+    /// Schema overview for the MCP resource `ds://{name}/schema`: tables with
+    /// their columns (SQL) or collection names (mongo). Capped at 100 tables.
+    pub async fn schema(&self) -> anyhow::Result<serde_json::Value> {
+        match self {
+            Source::Sql(s) => {
+                let tables_rs = s.query(&s.list_tables_sql(None), 1000).await?;
+                let mut tables = Vec::new();
+                for row in &tables_rs.rows {
+                    // Table name is the last column of every engine's listing
+                    // (mysql/sqlite: 1 col; pg/mssql: schema, name).
+                    let Some(name) = row.last().and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    let cols = s.query(&s.describe_table_sql(name, None), 200).await?;
+                    tables.push(serde_json::json!({
+                        "name": name,
+                        "columns": cols.columns,
+                        "rows": cols.rows,
+                    }));
+                    if tables.len() >= 100 {
+                        break;
+                    }
+                }
+                Ok(serde_json::json!({
+                    "engine": s.engine().name(),
+                    "tables": tables,
+                }))
+            }
+            Source::Mongo(m) => {
+                let collections = m.list_collections(None).await?;
+                Ok(serde_json::json!({
+                    "engine": "mongodb",
+                    "collections": collections,
+                    "hint": "use find/list_indexes tools to inspect documents",
+                }))
+            }
+            Source::Redis(r) => {
+                let info = r.command(&["INFO".into(), "keyspace".into()]).await?;
+                Ok(serde_json::json!({
+                    "engine": "redis",
+                    "keyspace": info,
+                    "hint": "use the redis_command tool (SCAN, TYPE, ...) to inspect keys",
+                }))
+            }
         }
     }
 }

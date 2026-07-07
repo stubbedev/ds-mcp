@@ -18,7 +18,9 @@ fn call(id: u64, tool: &str, args: Value) -> String {
 /// wait for its response, then send the next. (The server handles concurrent
 /// requests concurrently, so firing them all at once would race.)
 fn run_session(config: &str, requests: &[String]) -> Vec<Value> {
-    let dir = std::env::temp_dir().join(format!("ds-mcp-e2e-{}", std::process::id()));
+    static SESSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("ds-mcp-e2e-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let cfg_path = dir.join("config.json");
     std::fs::write(&cfg_path, config).unwrap();
@@ -84,6 +86,63 @@ fn tool_result(responses: &[Value], id: u64) -> (String, bool) {
         .to_string();
     let is_error = result["isError"].as_bool().unwrap_or(false);
     (text, is_error)
+}
+
+#[test]
+fn duckdb_end_to_end() {
+    let dir = std::env::temp_dir().join(format!("ds-mcp-e2e-duck-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("demo.duckdb");
+    let _ = std::fs::remove_file(&db);
+    let db = db.to_str().unwrap();
+
+    let config = json!({
+        "sources": {"duck": {"engine": "duckdb", "path": db}}
+    })
+    .to_string();
+
+    let responses = run_session(
+        &config,
+        &[
+            call(
+                1,
+                "write_query",
+                json!({"source": "duck",
+                "sql": "CREATE TABLE widgets(id INTEGER, name TEXT, price DECIMAL(8,2), added DATE)"}),
+            ),
+            call(
+                2,
+                "write_query",
+                json!({"source": "duck",
+                "sql": "INSERT INTO widgets VALUES (1, 'sprocket', 9.95, DATE '2026-01-02')"}),
+            ),
+            call(
+                3,
+                "read_query",
+                json!({"source": "duck",
+                "sql": "SELECT id, name, price, added FROM widgets"}),
+            ),
+            call(4, "list_tables", json!({"source": "duck"})),
+            call(
+                5,
+                "read_query",
+                json!({"source": "duck", "sql": "DROP TABLE widgets"}),
+            ),
+        ],
+    );
+
+    let (text, is_error) = tool_result(&responses, 3);
+    assert!(!is_error, "select failed: {text}");
+    let rs: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(rs["rows"][0][1], json!("sprocket"), "{text}");
+    assert_eq!(rs["rows"][0][2], json!("9.95"), "{text}");
+    assert_eq!(rs["rows"][0][3], json!("2026-01-02"), "{text}");
+
+    let (text, is_error) = tool_result(&responses, 4);
+    assert!(!is_error && text.contains("widgets"), "{text}");
+
+    let (_, is_error) = tool_result(&responses, 5);
+    assert!(is_error, "DROP via read_query must be rejected");
 }
 
 #[test]

@@ -10,7 +10,11 @@ use std::time::Duration;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    CallToolResult, ContentBlock, ErrorData, ListResourcesResult, PaginatedRequestParams,
+    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
+    ServerInfo,
+};
 use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{RoleServer, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
@@ -29,9 +33,16 @@ pub struct DsServer {
     tool_router: ToolRouter<Self>,
 }
 
+/// Text content for humans/older clients + structuredContent for clients
+/// that parse it.
 fn ok_json<T: serde::Serialize>(value: &T) -> CallToolResult {
-    match serde_json::to_string_pretty(value) {
-        Ok(s) => CallToolResult::success(vec![ContentBlock::text(s)]),
+    match serde_json::to_value(value) {
+        Ok(v) => {
+            let text = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+            let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+            result.structured_content = Some(v);
+            result
+        }
         Err(e) => err(format!("serialize result: {e}")),
     }
 }
@@ -116,6 +127,8 @@ pub struct FindArgs {
     /// Maximum documents to return. Default 1000.
     pub limit: Option<usize>,
     pub skip: Option<u64>,
+    /// Return the query plan instead of executing.
+    pub explain: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -127,6 +140,8 @@ pub struct AggregateArgs {
     pub pipeline: serde_json::Value,
     /// Maximum documents to return (read pipelines only). Default 1000.
     pub limit: Option<usize>,
+    /// Return the query plan instead of executing.
+    pub explain: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -194,6 +209,13 @@ pub struct DropIndexArgs {
     pub name: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct RedisCommandArgs {
+    pub source: String,
+    /// Command and arguments as an array, e.g. ["HGETALL", "user:1"].
+    pub command: Vec<String>,
+}
+
 impl DsServer {
     pub fn new(resolver: Arc<Resolver>) -> Self {
         Self {
@@ -208,10 +230,7 @@ impl DsServer {
     /// 2. the client's roots/list (cached per session, cleared on
     ///    roots/list_changed; per-root registries cached by config mtime),
     /// 3. the global config registry.
-    async fn registry(
-        &self,
-        ctx: &RequestContext<RoleServer>,
-    ) -> Result<Arc<Registry>, CallToolResult> {
+    async fn registry(&self, ctx: &RequestContext<RoleServer>) -> Result<Arc<Registry>, String> {
         if let Some(parts) = ctx.extensions.get::<http::request::Parts>() {
             let values = ROOTS_HEADERS.iter().flat_map(|h| {
                 parts
@@ -226,11 +245,11 @@ impl DsServer {
                 // own roots or the global config.
                 return match self.resolver.for_roots(&paths).await {
                     Ok(Some(reg)) => Ok(reg),
-                    Ok(None) => Err(err(format!(
+                    Ok(None) => Err(format!(
                         "no {} found in the roots supplied via headers",
                         crate::config::ROOT_CONFIG_NAME
-                    ))),
-                    Err(e) => Err(err(format!("{e:#}"))),
+                    )),
+                    Err(e) => Err(format!("{e:#}")),
                 };
             }
         }
@@ -257,16 +276,16 @@ impl DsServer {
                 match self.resolver.for_roots(paths).await {
                     Ok(Some(reg)) => return Ok(reg),
                     Ok(None) => {}
-                    Err(e) => return Err(err(format!("{e:#}"))),
+                    Err(e) => return Err(format!("{e:#}")),
                 }
             }
         }
 
         self.resolver.global().ok_or_else(|| {
-            err(format!(
+            format!(
                 "no sources configured; add a {} to your workspace root or start the server with --config",
                 crate::config::ROOT_CONFIG_NAME
-            ))
+            )
         })
     }
 
@@ -275,7 +294,7 @@ impl DsServer {
         ctx: &RequestContext<RoleServer>,
         name: &str,
     ) -> Result<(Arc<crate::source::Source>, Duration), CallToolResult> {
-        let reg = self.registry(ctx).await?;
+        let reg = self.registry(ctx).await.map_err(err)?;
         let src = reg.get(name).map(Arc::clone).map_err(err)?;
         Ok((src, reg.query_timeout))
     }
@@ -378,8 +397,35 @@ impl DsServer {
     async fn list_sources(&self, ctx: RequestContext<RoleServer>) -> CallToolResult {
         match self.registry(&ctx).await {
             Ok(reg) => ok_json(&serde_json::json!({ "sources": reg.list() })),
-            Err(e) => e,
+            Err(e) => err(e),
         }
+    }
+
+    #[tool(
+        description = "Check connectivity to a source. Returns latency in milliseconds; useful to diagnose credentials, tunnels and network before running queries.",
+        annotations(read_only_hint = true)
+    )]
+    async fn ping(
+        &self,
+        Parameters(args): Parameters<SourceArg>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
+        let start = std::time::Instant::now();
+        self.run(timeout, async move {
+            match src.as_ref() {
+                crate::source::Source::Sql(s) => {
+                    s.query("SELECT 1", 1).await?;
+                }
+                crate::source::Source::Mongo(m) => m.ping().await?,
+                crate::source::Source::Redis(r) => r.ping().await?,
+            }
+            Ok(serde_json::json!({
+                "ok": true,
+                "latency_ms": start.elapsed().as_millis() as u64,
+            }))
+        })
+        .await
     }
 
     #[tool(
@@ -404,6 +450,13 @@ impl DsServer {
                 self.run(timeout, async move {
                     let names = m.list_databases().await?;
                     Ok(serde_json::json!({"values": names}))
+                })
+                .await
+            }
+            crate::source::Source::Redis(r) => {
+                self.run(timeout, async move {
+                    let info = r.command(&["INFO".into(), "keyspace".into()]).await?;
+                    Ok(serde_json::json!({"keyspace": info}))
                 })
                 .await
             }
@@ -441,7 +494,7 @@ impl DsServer {
     }
 
     #[tool(
-        description = "Run a single read-only SQL statement (SELECT/SHOW/DESCRIBE/EXPLAIN) on a SQL source. Results are capped at `limit` rows with a truncated flag.",
+        description = "Run a single read-only SQL statement (SELECT/SHOW/DESCRIBE/EXPLAIN) on a SQL source. Results are capped at `limit` rows with a truncated flag; paginate large results with LIMIT/OFFSET in the SQL.",
         annotations(read_only_hint = true)
     )]
     async fn read_query(
@@ -507,6 +560,22 @@ impl DsServer {
         let projection = unwrap_or_return!(opt_doc_opt(args.projection));
         let sort = unwrap_or_return!(opt_doc_opt(args.sort));
         let limit = args.limit.unwrap_or(DEFAULT_ROW_LIMIT);
+        if args.explain.unwrap_or(false) {
+            let mut cmd =
+                bson::doc! {"find": &args.collection, "filter": filter, "limit": limit as i64};
+            if let Some(p) = projection {
+                cmd.insert("projection", p);
+            }
+            if let Some(so) = sort {
+                cmd.insert("sort", so);
+            }
+            if let Some(sk) = args.skip {
+                cmd.insert("skip", sk as i64);
+            }
+            return self
+                .run(timeout, m.explain(args.database.as_deref(), cmd))
+                .await;
+        }
         self.run(
             timeout,
             m.find(
@@ -541,6 +610,16 @@ impl DsServer {
             ));
         }
         let limit = args.limit.unwrap_or(DEFAULT_ROW_LIMIT);
+        if args.explain.unwrap_or(false) {
+            let cmd = bson::doc! {
+                "aggregate": &args.collection,
+                "pipeline": pipeline,
+                "cursor": {},
+            };
+            return self
+                .run(timeout, m.explain(args.database.as_deref(), cmd))
+                .await;
+        }
         self.run(
             timeout,
             m.aggregate(args.database.as_deref(), &args.collection, pipeline, limit),
@@ -773,6 +852,36 @@ impl DsServer {
     }
 
     #[tool(
+        description = "Run a Redis command, e.g. [\"HGETALL\", \"user:1\"]. On read-only sources only read commands (GET/SCAN/HGETALL/...) are allowed.",
+        annotations(destructive_hint = true)
+    )]
+    async fn redis_command(
+        &self,
+        Parameters(args): Parameters<RedisCommandArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
+        let r = match src.as_redis(&args.source) {
+            Ok(r) => r,
+            Err(e) => return err(e),
+        };
+        let Some(first) = args.command.first() else {
+            return err("command is empty");
+        };
+        if r.readonly() && !crate::source::redis::is_read_command(first) {
+            return err(format!(
+                "{first} is not a read command and source {:?} is read-only",
+                args.source
+            ));
+        }
+        self.run(timeout, async move {
+            let value = r.command(&args.command).await?;
+            Ok(serde_json::json!({"result": value}))
+        })
+        .await
+    }
+
+    #[tool(
         description = "Drop a MongoDB collection and all its documents.",
         annotations(destructive_hint = true)
     )]
@@ -798,8 +907,78 @@ impl ServerHandler for DsServer {
         *self.roots_cache.lock().await = None;
     }
 
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        let reg = self
+            .registry(&ctx)
+            .await
+            .map_err(|e| ErrorData::invalid_request(e, None))?;
+        let resources = reg
+            .list()
+            .into_iter()
+            .map(|info| {
+                Resource::new(
+                    format!("ds://{}/schema", info.name),
+                    format!("{}-schema", info.name),
+                )
+                .with_description(format!(
+                    "Schema overview of source {:?} ({}): tables and columns",
+                    info.name, info.engine
+                ))
+                .with_mime_type("application/json")
+            })
+            .collect();
+        Ok(ListResourcesResult::with_all_items(resources))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        let name = request
+            .uri
+            .strip_prefix("ds://")
+            .and_then(|rest| rest.strip_suffix("/schema"))
+            .ok_or_else(|| {
+                ErrorData::invalid_params(
+                    format!(
+                        "unknown resource {:?}; expected ds://<source>/schema",
+                        request.uri
+                    ),
+                    None,
+                )
+            })?;
+        let reg = self
+            .registry(&ctx)
+            .await
+            .map_err(|e| ErrorData::invalid_request(e, None))?;
+        let src = reg
+            .get(name)
+            .map(Arc::clone)
+            .map_err(|e| ErrorData::invalid_params(e, None))?;
+        let schema = tokio::time::timeout(reg.query_timeout, src.schema())
+            .await
+            .map_err(|_| ErrorData::internal_error("schema read timed out", None))?
+            .map_err(|e| ErrorData::internal_error(format!("{e:#}"), None))?;
+        let text = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string());
+        Ok(ReadResourceResult::new(vec![ResourceContents::text(
+            text,
+            request.uri,
+        )]))
+    }
+
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        )
+        .with_instructions(
             "DataStore MCP exposes named database sources (SQL and document engines). \
                  Start with list_sources to see what is available, then use the SQL tools \
                  (read_query, list_tables, ...) against SQL sources.",

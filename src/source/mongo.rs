@@ -143,6 +143,24 @@ impl MongoSource {
         Ok(docs_out(docs, limit))
     }
 
+    pub async fn ping(&self) -> Result<()> {
+        self.client()
+            .await?
+            .database("admin")
+            .run_command(bson::doc! {"ping": 1})
+            .await?;
+        Ok(())
+    }
+
+    /// Explain a find or aggregate command without executing it.
+    pub async fn explain(&self, database: Option<&str>, command: Document) -> Result<Value> {
+        let db = self.db(database).await?;
+        let result = db
+            .run_command(bson::doc! {"explain": command, "verbosity": "queryPlanner"})
+            .await?;
+        Ok(doc_to_json(result))
+    }
+
     /// Pipelines containing $out/$merge write; the caller gates those on
     /// readonly sources.
     pub fn pipeline_writes(pipeline: &[Document]) -> bool {

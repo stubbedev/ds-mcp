@@ -30,7 +30,18 @@ pub enum SqlPool {
     MySql(MySqlPool),
     Pg(PgPool),
     Sqlite(SqlitePool),
+    // ponytail: one connection behind a mutex — duckdb's API is sync and MCP
+    // traffic is low; add a real pool if it ever becomes the bottleneck.
+    DuckDb(std::sync::Arc<std::sync::Mutex<duckdb::Connection>>),
     Mssql(deadpool_tiberius::Pool),
+    // ClickHouse speaks HTTP; no connection to pool.
+    ClickHouse(ClickHouseHttp),
+}
+
+pub struct ClickHouseHttp {
+    client: reqwest::Client,
+    /// Base URL including any ?database=/user=/password= params.
+    url: String,
 }
 
 impl SqlSource {
@@ -62,7 +73,9 @@ impl SqlSource {
             Some(SqlPool::MySql(p)) => p.close().await,
             Some(SqlPool::Pg(p)) => p.close().await,
             Some(SqlPool::Sqlite(p)) => p.close().await,
+            Some(SqlPool::DuckDb(_)) => {}
             Some(SqlPool::Mssql(p)) => p.close(),
+            Some(SqlPool::ClickHouse(_)) => {}
             None => {}
         }
     }
@@ -88,7 +101,8 @@ impl SqlSource {
             EngineKind::MySql | EngineKind::MariaDb => 3306,
             EngineKind::Postgres => 5432,
             EngineKind::Mssql => 1433,
-            _ => 0,
+            EngineKind::ClickHouse => 8123,
+            _ => 0, // file engines
         };
         let (host, port) = match &cfg.ssh {
             Some(ssh) => {
@@ -154,6 +168,21 @@ impl SqlSource {
                 let o = o.read_only(self.readonly);
                 SqlPool::Sqlite(opts(cfg).connect_lazy_with(o))
             }
+            EngineKind::DuckDb => {
+                let path = cfg.path.clone().or_else(|| cfg.dsn.clone());
+                let path = path.ok_or_else(|| anyhow::anyhow!("duckdb needs path"))?;
+                let readonly = self.readonly;
+                let conn = tokio::task::spawn_blocking(move || {
+                    let mut config = duckdb::Config::default();
+                    if readonly {
+                        config = config.access_mode(duckdb::AccessMode::ReadOnly)?;
+                    }
+                    duckdb::Connection::open_with_flags(&path, config)
+                        .with_context(|| format!("open duckdb {path}"))
+                })
+                .await??;
+                SqlPool::DuckDb(std::sync::Arc::new(std::sync::Mutex::new(conn)))
+            }
             EngineKind::Mssql => {
                 let mut m = match &cfg.dsn {
                     // ADO connection string; TrustServerCertificate etc. go here.
@@ -172,7 +201,37 @@ impl SqlSource {
                 m = m.max_size(8).create_timeout(cfg.connect_timeout());
                 SqlPool::Mssql(m.create_pool()?)
             }
-            EngineKind::MongoDb => {
+            EngineKind::ClickHouse => {
+                // HTTP interface. dsn = full base URL (auth via URL params or
+                // https); discrete fields build one.
+                let mut url = match &cfg.dsn {
+                    Some(dsn) => dsn.clone(),
+                    None => {
+                        let mut url = format!("http://{host}:{port}/?");
+                        if let Some(u) = &cfg.user {
+                            url.push_str(&format!("user={u}&"));
+                        }
+                        if let Some(p) = &cfg.password {
+                            url.push_str(&format!("password={p}&"));
+                        }
+                        if let Some(d) = &cfg.database {
+                            url.push_str(&format!("database={d}&"));
+                        }
+                        url
+                    }
+                };
+                // collect/exec append query params directly.
+                if !url.contains('?') {
+                    url.push('?');
+                } else if !url.ends_with('?') && !url.ends_with('&') {
+                    url.push('&');
+                }
+                let client = reqwest::Client::builder()
+                    .connect_timeout(cfg.connect_timeout())
+                    .build()?;
+                SqlPool::ClickHouse(ClickHouseHttp { client, url })
+            }
+            EngineKind::Redis | EngineKind::MongoDb => {
                 bail!("engine {} not handled by SqlSource", cfg.engine.name())
             }
         })
@@ -206,10 +265,16 @@ impl SqlSource {
                 )
                 .await?
             }
+            SqlPool::DuckDb(conn) => {
+                let conn = std::sync::Arc::clone(conn);
+                let sql = sql.to_owned();
+                tokio::task::spawn_blocking(move || duckdb_collect(&conn, &sql, fetch)).await??
+            }
             SqlPool::Mssql(p) => {
                 let mut conn = p.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
                 mssql_collect(&mut conn, sql, fetch).await?
             }
+            SqlPool::ClickHouse(ch) => clickhouse_collect(ch, sql, fetch).await?,
         };
         let truncated = rows.len() > limit;
         rows.truncate(limit);
@@ -245,11 +310,32 @@ impl SqlSource {
                     last_insert_id: u64::try_from(r.last_insert_rowid()).ok(),
                 }
             }
+            SqlPool::DuckDb(conn) => {
+                let conn = std::sync::Arc::clone(conn);
+                let sql = sql.to_owned();
+                let affected = tokio::task::spawn_blocking(move || {
+                    let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+                    conn.execute(&sql, [])
+                })
+                .await??;
+                ExecResult {
+                    rows_affected: affected as u64,
+                    last_insert_id: None,
+                }
+            }
             SqlPool::Mssql(p) => {
                 let mut conn = p.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
                 let r = conn.execute(sql.to_owned(), &[]).await?;
                 ExecResult {
                     rows_affected: r.total(),
+                    last_insert_id: None,
+                }
+            }
+            SqlPool::ClickHouse(ch) => {
+                clickhouse_exec(ch, sql).await?;
+                // The HTTP interface does not report affected rows.
+                ExecResult {
+                    rows_affected: 0,
                     last_insert_id: None,
                 }
             }
@@ -293,9 +379,10 @@ impl SqlSource {
             EngineKind::Postgres => {
                 "SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY datname"
             }
-            EngineKind::Sqlite => "PRAGMA database_list",
+            EngineKind::Sqlite | EngineKind::DuckDb => "PRAGMA database_list",
             EngineKind::Mssql => "SELECT name FROM sys.databases ORDER BY name",
-            EngineKind::MongoDb => unreachable!(),
+            EngineKind::ClickHouse => "SHOW DATABASES",
+            EngineKind::Redis | EngineKind::MongoDb => unreachable!(),
         }
     }
 
@@ -323,6 +410,11 @@ impl SqlSource {
             EngineKind::Sqlite => {
                 "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name".into()
             }
+            EngineKind::DuckDb => "SHOW TABLES".into(),
+            EngineKind::ClickHouse => match db {
+                Some(db) => format!("SHOW TABLES FROM {}", quote_ident_mysql(db)),
+                None => "SHOW TABLES".into(),
+            },
             EngineKind::Mssql => {
                 let prefix = db
                     .map(|d| format!("{}.", quote_ident_bracket(d)))
@@ -332,7 +424,7 @@ impl SqlSource {
                      WHERE table_type = 'BASE TABLE' ORDER BY 1, 2"
                 )
             }
-            EngineKind::MongoDb => unreachable!(),
+            EngineKind::Redis | EngineKind::MongoDb => unreachable!(),
         }
     }
 
@@ -361,6 +453,15 @@ impl SqlSource {
                 )
             }
             EngineKind::Sqlite => format!("PRAGMA table_info({})", quote_ident_dq(table)),
+            EngineKind::DuckDb => format!("DESCRIBE {}", quote_ident_dq(table)),
+            EngineKind::ClickHouse => match db {
+                Some(db) => format!(
+                    "DESCRIBE TABLE {}.{}",
+                    quote_ident_mysql(db),
+                    quote_ident_mysql(table)
+                ),
+                None => format!("DESCRIBE TABLE {}", quote_ident_mysql(table)),
+            },
             EngineKind::Mssql => {
                 let prefix = db
                     .map(|d| format!("{}.", quote_ident_bracket(d)))
@@ -372,7 +473,7 @@ impl SqlSource {
                     quote_literal(table)
                 )
             }
-            EngineKind::MongoDb => unreachable!(),
+            EngineKind::Redis | EngineKind::MongoDb => unreachable!(),
         }
     }
 
@@ -418,6 +519,152 @@ async fn collect<R>(
         }
     }
     Ok((columns, rows))
+}
+
+/// ClickHouse HTTP: append FORMAT JSONCompact and parse {meta, data}.
+/// max_result_rows/break caps the result server-side.
+async fn clickhouse_collect(
+    ch: &ClickHouseHttp,
+    sql: &str,
+    fetch: usize,
+) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    let url = format!(
+        "{}max_result_rows={fetch}&result_overflow_mode=break&output_format_json_quote_64bit_integers=0",
+        ch.url
+    );
+    let body = format!("{} FORMAT JSONCompact", sql.trim_end_matches(';'));
+    let resp = ch.client.post(&url).body(body).send().await?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        bail!("clickhouse: {}", text.trim());
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&text).with_context(
+        || "parse clickhouse JSONCompact response (does the query already contain a FORMAT clause?)",
+    )?;
+    let columns = parsed["meta"]
+        .as_array()
+        .map(|m| {
+            m.iter()
+                .map(|c| c["name"].as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let rows = parsed["data"]
+        .as_array()
+        .map(|d| {
+            d.iter()
+                .map(|row| row.as_array().cloned().unwrap_or_default())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((columns, rows))
+}
+
+async fn clickhouse_exec(ch: &ClickHouseHttp, sql: &str) -> Result<()> {
+    let resp = ch.client.post(&ch.url).body(sql.to_owned()).send().await?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        bail!("clickhouse: {}", text.trim());
+    }
+    Ok(())
+}
+
+fn duckdb_collect(
+    conn: &std::sync::Mutex<duckdb::Connection>,
+    sql: &str,
+    fetch: usize,
+) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows_iter = stmt.query([])?;
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows = Vec::new();
+    while let Some(row) = rows_iter.next()? {
+        if columns.is_empty() {
+            columns = row
+                .as_ref()
+                .column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        }
+        rows.push(
+            (0..columns.len())
+                .map(|i| {
+                    duckdb_value(
+                        row.get::<_, duckdb::types::Value>(i)
+                            .unwrap_or(duckdb::types::Value::Null),
+                    )
+                })
+                .collect(),
+        );
+        if rows.len() >= fetch {
+            break;
+        }
+    }
+    Ok((columns, rows))
+}
+
+fn duckdb_value(v: duckdb::types::Value) -> Value {
+    use duckdb::types::Value as D;
+    match v {
+        D::Null => Value::Null,
+        D::Boolean(b) => Value::Bool(b),
+        D::TinyInt(n) => Value::from(n),
+        D::SmallInt(n) => Value::from(n),
+        D::Int(n) => Value::from(n),
+        D::BigInt(n) => Value::from(n),
+        D::HugeInt(n) => Value::String(n.to_string()),
+        D::UTinyInt(n) => Value::from(n),
+        D::USmallInt(n) => Value::from(n),
+        D::UInt(n) => Value::from(n),
+        D::UBigInt(n) => Value::from(n),
+        D::Float(f) => num_f64(f as f64),
+        D::Double(f) => num_f64(f),
+        D::Decimal(d) => Value::String(d.to_string()),
+        D::Text(s) | D::Enum(s) => Value::String(s),
+        D::Blob(b) => bytes_value(b),
+        D::Timestamp(unit, n) => {
+            match chrono::DateTime::from_timestamp_micros(to_micros(unit, n)) {
+                Some(ts) => Value::String(ts.naive_utc().to_string()),
+                None => Value::Null,
+            }
+        }
+        D::Date32(days) => chrono::NaiveDate::from_num_days_from_ce_opt(days + 719_163)
+            .map(|d| Value::String(d.to_string()))
+            .unwrap_or(Value::Null),
+        D::Time64(unit, n) => {
+            let micros = to_micros(unit, n);
+            chrono::NaiveTime::from_num_seconds_from_midnight_opt(
+                (micros / 1_000_000) as u32,
+                ((micros % 1_000_000) * 1000) as u32,
+            )
+            .map(|t| Value::String(t.to_string()))
+            .unwrap_or(Value::Null)
+        }
+        D::List(items) | D::Array(items) => {
+            Value::Array(items.into_iter().map(duckdb_value).collect())
+        }
+        D::Struct(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), duckdb_value(v.clone())))
+                .collect(),
+        ),
+        D::Union(inner) => duckdb_value(*inner),
+        other => Value::String(format!("{other:?}")),
+    }
+}
+
+fn to_micros(unit: duckdb::types::TimeUnit, n: i64) -> i64 {
+    use duckdb::types::TimeUnit;
+    match unit {
+        TimeUnit::Second => n * 1_000_000,
+        TimeUnit::Millisecond => n * 1_000,
+        TimeUnit::Microsecond => n,
+        TimeUnit::Nanosecond => n / 1_000,
+    }
 }
 
 async fn mssql_collect(
