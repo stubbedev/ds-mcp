@@ -63,6 +63,75 @@ clean:
     rm -rf bin/
     cargo clean
 
+# ─────────────────────────── Nix ───────────────────────────
+
+nix-build:
+    nix build .#default --print-build-logs
+
+nix-check:
+    nix flake check --print-build-logs
+
+# ─────────────────────────── Release ───────────────────────────
+
+release-preview:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CURRENT=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+    MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+    MINOR=$(echo "$CURRENT" | cut -d. -f2)
+    PATCH=$(echo "$CURRENT" | cut -d. -f3)
+    echo "Current version: $CURRENT"
+    echo "  release-major: v$((MAJOR + 1)).0.0"
+    echo "  release-minor: v${MAJOR}.$((MINOR + 1)).0"
+    echo "  release-patch: v${MAJOR}.${MINOR}.$((PATCH + 1))"
+
+_release-checks:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    DEFAULT_BRANCH=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)
+    DEFAULT_BRANCH=${DEFAULT_BRANCH:-master}
+    if [ "$BRANCH" != "$DEFAULT_BRANCH" ]; then
+        echo "Error: not on default branch '$DEFAULT_BRANCH' (currently '$BRANCH')." >&2
+        exit 1
+    fi
+    just check
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "check produced changes — staging + committing."
+        git add -A
+        git commit -m "chore: regenerate artifacts for release"
+    fi
+
+# Cargo.toml is the single source of truth for the version; the flake reads
+# it and the tag mirrors it.
+_release bump:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just _release-checks
+    CURRENT=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+    MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+    MINOR=$(echo "$CURRENT" | cut -d. -f2)
+    PATCH=$(echo "$CURRENT" | cut -d. -f3)
+    case "{{bump}}" in
+        major) NEW="$((MAJOR + 1)).0.0" ;;
+        minor) NEW="${MAJOR}.$((MINOR + 1)).0" ;;
+        patch) NEW="${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
+        *) echo "unknown bump kind: {{bump}}"; exit 1 ;;
+    esac
+    sed -i "0,/^version = \".*\"/s//version = \"${NEW}\"/" Cargo.toml
+    cargo build -q   # refresh Cargo.lock
+    git add Cargo.toml Cargo.lock
+    git commit -m "chore: bump to v${NEW}"
+    git tag -a "v${NEW}" -m "v${NEW}"
+    git push origin HEAD
+    git push origin "v${NEW}"
+    echo
+    echo "Tagged v${NEW}. Watch the release build with: gh run watch"
+
+release-patch: (_release "patch")
+release-minor: (_release "minor")
+release-major: (_release "major")
+
 # ─────────────────────────── E2E (docker) ───────────────────────────
 
 # Exercise the tools against a throwaway docker MySQL on port 13306.

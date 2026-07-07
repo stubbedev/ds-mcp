@@ -1122,7 +1122,6 @@ dependencies = [
  "serde_json",
  "sqlparser",
  "sqlx",
- "thiserror 2.0.18",
  "tiberius",
  "tokio",
  "tokio-util",

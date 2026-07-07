@@ -306,10 +306,12 @@ impl SqlSource {
                 Some(db) => format!("SHOW TABLES FROM {}", quote_ident_mysql(db)),
                 None => "SHOW TABLES".into(),
             },
-            // Postgres cannot switch databases per query; `database` filters
-            // the schema instead.
+            // Postgres cannot switch databases per query; an explicit
+            // `database` argument filters the schema instead. The source's
+            // configured database is a catalog, not a schema — never use it
+            // as a filter here.
             EngineKind::Postgres => {
-                let filter = match db {
+                let filter = match database {
                     Some(schema) => format!("AND table_schema = {}", quote_literal(schema)),
                     None => "AND table_schema NOT IN ('pg_catalog','information_schema')".into(),
                 };
@@ -345,8 +347,9 @@ impl SqlSource {
                 ),
                 None => format!("DESCRIBE {}", quote_ident_mysql(table)),
             },
+            // Same schema-vs-catalog distinction as list_tables_sql.
             EngineKind::Postgres => {
-                let schema = match db {
+                let schema = match database {
                     Some(schema) => format!("AND table_schema = {}", quote_literal(schema)),
                     None => String::new(),
                 };
