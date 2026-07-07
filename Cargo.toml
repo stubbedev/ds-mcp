@@ -1,6 +1,6 @@
 [package]
 name = "ds-mcp"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "DataStore MCP — multi-engine data-source MCP server"
 license = "MIT"
