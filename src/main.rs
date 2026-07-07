@@ -1,4 +1,5 @@
 mod config;
+mod http;
 mod registry;
 mod source;
 mod sqlguard;
@@ -7,7 +8,7 @@ mod tools;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use rmcp::ServiceExt;
 
@@ -84,25 +85,32 @@ fn gen_schema(output: &std::path::Path) -> Result<()> {
 async fn serve(
     config_path: Option<PathBuf>,
     transport: Transport,
-    _http_addr: Option<String>,
+    http_addr: Option<String>,
     read_only: bool,
 ) -> Result<()> {
     let cfg = match &config_path {
         // An explicit --config that fails to load is fatal.
-        Some(p) => config::load(p)?,
+        Some(p) => Some(config::load(p)?),
         None => match config::default_path_global().filter(|p| p.exists()) {
-            Some(p) => config::load(&p)?,
-            None => bail!(
-                "no config found (looked for {}); pass --config",
-                config::default_path_global()
-                    .unwrap_or_else(|| "~/.config/ds-mcp/config.json".into())
-                    .display()
-            ),
+            Some(p) => Some(config::load(&p)?),
+            // Roots-only mode: clients supply sources via a .ds-mcp.json at
+            // their workspace root.
+            None => {
+                tracing::warn!(
+                    "no global config found; running in roots-only mode \
+                     (clients need a {} in a workspace root)",
+                    config::ROOT_CONFIG_NAME
+                );
+                None
+            }
         },
     };
-    let query_timeout = cfg.query_timeout();
-    let registry = Arc::new(registry::Registry::new(cfg, read_only)?);
-    let server = tools::DsServer::new(Arc::clone(&registry), query_timeout);
+    let http_cfg = cfg.as_ref().map(|c| c.http.clone()).unwrap_or_default();
+    let global = cfg
+        .map(|c| registry::Registry::new(c, read_only).map(Arc::new))
+        .transpose()?;
+    let resolver = Arc::new(registry::Resolver::new(global, read_only));
+    let server = tools::DsServer::new(Arc::clone(&resolver));
 
     match transport {
         Transport::Stdio => {
@@ -111,9 +119,9 @@ async fn serve(
             running.waiting().await?;
         }
         Transport::Http => {
-            bail!("http transport not implemented yet");
+            http::serve(server, &http_cfg, http_addr).await?;
         }
     }
-    registry.close().await;
+    resolver.close().await;
     Ok(())
 }

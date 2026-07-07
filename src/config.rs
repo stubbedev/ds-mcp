@@ -8,6 +8,9 @@ use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// File name of the per-workspace config discovered from MCP client roots.
+pub const ROOT_CONFIG_NAME: &str = ".ds-mcp.json";
+
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -17,7 +20,6 @@ pub struct Config {
     pub schema: Option<String>,
     /// HTTP transport settings; only used with `--transport http`.
     #[serde(default)]
-    #[allow(dead_code)] // read by the http transport (phase 3)
     pub http: HttpConfig,
     /// Per-query timeout in seconds. Default 30.
     pub query_timeout_seconds: Option<u64>,
@@ -27,9 +29,8 @@ pub struct Config {
     pub sources: BTreeMap<String, SourceConfig>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)] // read by the http transport (phase 3)
 pub struct HttpConfig {
     /// Listen address. Default 127.0.0.1:7100.
     #[serde(default = "default_addr")]

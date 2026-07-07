@@ -826,6 +826,7 @@ dependencies = [
  "deadpool-tiberius",
  "dirs",
  "futures-util",
+ "http",
  "mongodb",
  "rmcp",
  "rust_decimal",

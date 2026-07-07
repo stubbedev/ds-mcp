@@ -11,18 +11,21 @@ use std::time::Duration;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
-use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use rmcp::service::{NotificationContext, RequestContext};
+use rmcp::{RoleServer, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::registry::Registry;
+use crate::registry::{Registry, Resolver};
 use crate::source::mongo::MongoSource;
 use crate::source::sql::SqlSource;
 
 #[derive(Clone)]
 pub struct DsServer {
-    registry: Arc<Registry>,
-    query_timeout: Duration,
+    resolver: Arc<Resolver>,
+    /// Workspace roots fetched from this session's client; cleared on
+    /// roots/list_changed. One DsServer instance == one session.
+    roots_cache: Arc<tokio::sync::Mutex<Option<Vec<std::path::PathBuf>>>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -192,37 +195,114 @@ pub struct DropIndexArgs {
 }
 
 impl DsServer {
-    pub fn new(registry: Arc<Registry>, query_timeout: Duration) -> Self {
+    pub fn new(resolver: Arc<Resolver>) -> Self {
         Self {
-            registry,
-            query_timeout,
+            resolver,
+            roots_cache: Arc::new(tokio::sync::Mutex::new(None)),
             tool_router: Self::tool_router(),
         }
     }
 
-    fn sql_source(&self, name: &str) -> Result<Arc<crate::source::Source>, CallToolResult> {
-        self.registry.get(name).map(Arc::clone).map_err(err)
+    /// Which registry does this call use? Precedence:
+    /// 1. roots injected via HTTP headers (request-scoped, never cached),
+    /// 2. the client's roots/list (cached per session, cleared on
+    ///    roots/list_changed; per-root registries cached by config mtime),
+    /// 3. the global config registry.
+    async fn registry(
+        &self,
+        ctx: &RequestContext<RoleServer>,
+    ) -> Result<Arc<Registry>, CallToolResult> {
+        if let Some(parts) = ctx.extensions.get::<http::request::Parts>() {
+            let values = ROOTS_HEADERS.iter().flat_map(|h| {
+                parts
+                    .headers
+                    .get_all(*h)
+                    .iter()
+                    .filter_map(|v| v.to_str().ok())
+            });
+            let paths = crate::registry::parse_root_paths(values);
+            if !paths.is_empty() {
+                // Header roots are authoritative: no fallback to the client's
+                // own roots or the global config.
+                return match self.resolver.for_roots(&paths).await {
+                    Ok(Some(reg)) => Ok(reg),
+                    Ok(None) => Err(err(format!(
+                        "no {} found in the roots supplied via headers",
+                        crate::config::ROOT_CONFIG_NAME
+                    ))),
+                    Err(e) => Err(err(format!("{e:#}"))),
+                };
+            }
+        }
+
+        let supports_roots = ctx
+            .peer
+            .peer_info()
+            .is_some_and(|info| info.capabilities.roots.is_some());
+        if supports_roots {
+            let mut cache = self.roots_cache.lock().await;
+            if cache.is_none() {
+                #[allow(deprecated)] // roots is deprecated in the MCP spec but still widely used
+                match ctx.peer.list_roots().await {
+                    Ok(result) => {
+                        let uris: Vec<String> = result.roots.into_iter().map(|r| r.uri).collect();
+                        *cache = Some(crate::registry::parse_root_paths(
+                            uris.iter().map(String::as_str),
+                        ));
+                    }
+                    Err(e) => tracing::warn!("roots/list failed: {e}"),
+                }
+            }
+            if let Some(paths) = cache.as_deref() {
+                match self.resolver.for_roots(paths).await {
+                    Ok(Some(reg)) => return Ok(reg),
+                    Ok(None) => {}
+                    Err(e) => return Err(err(format!("{e:#}"))),
+                }
+            }
+        }
+
+        self.resolver.global().ok_or_else(|| {
+            err(format!(
+                "no sources configured; add a {} to your workspace root or start the server with --config",
+                crate::config::ROOT_CONFIG_NAME
+            ))
+        })
     }
 
-    /// Run a source future under the configured query timeout, rendering any
-    /// error as a tool result.
+    async fn source(
+        &self,
+        ctx: &RequestContext<RoleServer>,
+        name: &str,
+    ) -> Result<(Arc<crate::source::Source>, Duration), CallToolResult> {
+        let reg = self.registry(ctx).await?;
+        let src = reg.get(name).map(Arc::clone).map_err(err)?;
+        Ok((src, reg.query_timeout))
+    }
+
+    /// Run a source future under the query timeout, rendering any error as a
+    /// tool result.
     async fn run<T: serde::Serialize>(
         &self,
+        timeout: Duration,
         fut: impl Future<Output = anyhow::Result<T>>,
     ) -> CallToolResult {
-        match tokio::time::timeout(self.query_timeout, fut).await {
-            Err(_) => err(format!("timed out after {}s", self.query_timeout.as_secs())),
+        match tokio::time::timeout(timeout, fut).await {
+            Err(_) => err(format!("timed out after {}s", timeout.as_secs())),
             Ok(Err(e)) => err(format!("{e:#}")),
             Ok(Ok(v)) => ok_json(&v),
         }
     }
 }
 
-/// Resolve `$args.source` as a SQL-family source or return the error result.
-macro_rules! sql_src {
-    ($self:expr, $name:expr) => {
-        match $self.sql_source(&$name) {
-            Ok(src) => src,
+/// Header names a trusted proxy can use to inject workspace roots.
+const ROOTS_HEADERS: [&str; 4] = ["x-mcp-roots", "x-mcp-root", "mcp-roots", "mcp-root"];
+
+/// Resolve `$args.source` (plus the query timeout) or return the error result.
+macro_rules! src {
+    ($self:expr, $ctx:expr, $name:expr) => {
+        match $self.source(&$ctx, &$name).await {
+            Ok(v) => v,
             Err(e) => return e,
         }
     };
@@ -295,23 +375,33 @@ impl DsServer {
         description = "List the configured data sources: name, engine, description, readonly and remote flags. Call this first to pick the right source.",
         annotations(read_only_hint = true)
     )]
-    async fn list_sources(&self) -> CallToolResult {
-        ok_json(&serde_json::json!({ "sources": self.registry.list() }))
+    async fn list_sources(&self, ctx: RequestContext<RoleServer>) -> CallToolResult {
+        match self.registry(&ctx).await {
+            Ok(reg) => ok_json(&serde_json::json!({ "sources": reg.list() })),
+            Err(e) => e,
+        }
     }
 
     #[tool(
         description = "List databases/schemas available on a source (any engine).",
         annotations(read_only_hint = true)
     )]
-    async fn list_databases(&self, Parameters(args): Parameters<SourceArg>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn list_databases(
+        &self,
+        Parameters(args): Parameters<SourceArg>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         match src.as_ref() {
             crate::source::Source::Sql(sql) => {
-                self.run(sql.query(sql.list_databases_sql(), DEFAULT_ROW_LIMIT))
-                    .await
+                self.run(
+                    timeout,
+                    sql.query(sql.list_databases_sql(), DEFAULT_ROW_LIMIT),
+                )
+                .await
             }
             crate::source::Source::Mongo(m) => {
-                self.run(async move {
+                self.run(timeout, async move {
                     let names = m.list_databases().await?;
                     Ok(serde_json::json!({"values": names}))
                 })
@@ -324,11 +414,15 @@ impl DsServer {
         description = "List tables on a SQL source.",
         annotations(read_only_hint = true)
     )]
-    async fn list_tables(&self, Parameters(args): Parameters<ListTablesArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn list_tables(
+        &self,
+        Parameters(args): Parameters<ListTablesArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let sql = unwrap_or_return!(as_sql(&src, &args.source));
         let stmt = sql.list_tables_sql(args.database.as_deref());
-        self.run(sql.query(&stmt, DEFAULT_ROW_LIMIT)).await
+        self.run(timeout, sql.query(&stmt, DEFAULT_ROW_LIMIT)).await
     }
 
     #[tool(
@@ -338,48 +432,62 @@ impl DsServer {
     async fn describe_table(
         &self,
         Parameters(args): Parameters<DescribeTableArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+        let (src, timeout) = src!(self, ctx, args.source);
         let sql = unwrap_or_return!(as_sql(&src, &args.source));
         let stmt = sql.describe_table_sql(&args.table, args.database.as_deref());
-        self.run(sql.query(&stmt, DEFAULT_ROW_LIMIT)).await
+        self.run(timeout, sql.query(&stmt, DEFAULT_ROW_LIMIT)).await
     }
 
     #[tool(
         description = "Run a single read-only SQL statement (SELECT/SHOW/DESCRIBE/EXPLAIN) on a SQL source. Results are capped at `limit` rows with a truncated flag.",
         annotations(read_only_hint = true)
     )]
-    async fn read_query(&self, Parameters(args): Parameters<ReadQueryArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn read_query(
+        &self,
+        Parameters(args): Parameters<ReadQueryArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let sql = unwrap_or_return!(as_sql(&src, &args.source));
         if let Err(e) = crate::sqlguard::ensure_read_only(sql.engine(), &args.sql) {
             return err(e);
         }
         let limit = args.limit.unwrap_or(DEFAULT_ROW_LIMIT);
-        self.run(sql.query(&args.sql, limit)).await
+        self.run(timeout, sql.query(&args.sql, limit)).await
     }
 
     #[tool(
         description = "Run a write/DDL SQL statement (INSERT/UPDATE/DELETE/CREATE/ALTER/...) on a writable SQL source.",
         annotations(destructive_hint = true)
     )]
-    async fn write_query(&self, Parameters(args): Parameters<SqlArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn write_query(
+        &self,
+        Parameters(args): Parameters<SqlArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let sql = unwrap_or_return!(as_sql(&src, &args.source));
         if sql.readonly() {
             return err(format!("source {:?} is read-only", args.source));
         }
-        self.run(sql.exec(&args.sql)).await
+        self.run(timeout, sql.exec(&args.sql)).await
     }
 
     #[tool(
         description = "Show the query plan for a SQL statement without executing it.",
         annotations(read_only_hint = true)
     )]
-    async fn explain_query(&self, Parameters(args): Parameters<SqlArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn explain_query(
+        &self,
+        Parameters(args): Parameters<SqlArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let sql = unwrap_or_return!(as_sql(&src, &args.source));
-        self.run(sql.explain(&args.sql, DEFAULT_ROW_LIMIT)).await
+        self.run(timeout, sql.explain(&args.sql, DEFAULT_ROW_LIMIT))
+            .await
     }
 
     // ── Document tools (mongodb) ────────────────────────────────────────
@@ -388,22 +496,29 @@ impl DsServer {
         description = "Query documents in a MongoDB collection. filter/projection/sort are Extended JSON objects.",
         annotations(read_only_hint = true)
     )]
-    async fn find(&self, Parameters(args): Parameters<FindArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn find(
+        &self,
+        Parameters(args): Parameters<FindArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let m = unwrap_or_return!(as_mongo(&src, &args.source));
         let filter = unwrap_or_return!(opt_doc(args.filter));
         let projection = unwrap_or_return!(opt_doc_opt(args.projection));
         let sort = unwrap_or_return!(opt_doc_opt(args.sort));
         let limit = args.limit.unwrap_or(DEFAULT_ROW_LIMIT);
-        self.run(m.find(
-            args.database.as_deref(),
-            &args.collection,
-            filter,
-            projection,
-            sort,
-            limit,
-            args.skip,
-        ))
+        self.run(
+            timeout,
+            m.find(
+                args.database.as_deref(),
+                &args.collection,
+                filter,
+                projection,
+                sort,
+                limit,
+                args.skip,
+            ),
+        )
         .await
     }
 
@@ -411,8 +526,12 @@ impl DsServer {
         description = "Run an aggregation pipeline on a MongoDB collection. pipeline is an Extended JSON array of stages; $out/$merge require a writable source.",
         annotations(read_only_hint = true)
     )]
-    async fn aggregate(&self, Parameters(args): Parameters<AggregateArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn aggregate(
+        &self,
+        Parameters(args): Parameters<AggregateArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let m = unwrap_or_return!(as_mongo(&src, &args.source));
         let pipeline = unwrap_or_return!(doc_array(args.pipeline));
         if crate::source::mongo::MongoSource::pipeline_writes(&pipeline) && m.readonly() {
@@ -422,19 +541,26 @@ impl DsServer {
             ));
         }
         let limit = args.limit.unwrap_or(DEFAULT_ROW_LIMIT);
-        self.run(m.aggregate(args.database.as_deref(), &args.collection, pipeline, limit))
-            .await
+        self.run(
+            timeout,
+            m.aggregate(args.database.as_deref(), &args.collection, pipeline, limit),
+        )
+        .await
     }
 
     #[tool(
         description = "Count documents in a MongoDB collection matching a filter.",
         annotations(read_only_hint = true)
     )]
-    async fn count(&self, Parameters(args): Parameters<FilterArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn count(
+        &self,
+        Parameters(args): Parameters<FilterArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let m = unwrap_or_return!(as_mongo(&src, &args.source));
         let filter = unwrap_or_return!(opt_doc(args.filter));
-        self.run(async move {
+        self.run(timeout, async move {
             let count = m
                 .count(args.database.as_deref(), &args.collection, filter)
                 .await?;
@@ -447,11 +573,15 @@ impl DsServer {
         description = "List distinct values of a field in a MongoDB collection.",
         annotations(read_only_hint = true)
     )]
-    async fn distinct(&self, Parameters(args): Parameters<DistinctArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn distinct(
+        &self,
+        Parameters(args): Parameters<DistinctArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let m = unwrap_or_return!(as_mongo(&src, &args.source));
         let filter = unwrap_or_return!(opt_doc(args.filter));
-        self.run(async move {
+        self.run(timeout, async move {
             let values = m
                 .distinct(
                     args.database.as_deref(),
@@ -469,10 +599,14 @@ impl DsServer {
         description = "List collections in a MongoDB database.",
         annotations(read_only_hint = true)
     )]
-    async fn list_collections(&self, Parameters(args): Parameters<DatabaseArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn list_collections(
+        &self,
+        Parameters(args): Parameters<DatabaseArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let m = unwrap_or_return!(as_mongo(&src, &args.source));
-        self.run(async move {
+        self.run(timeout, async move {
             let names = m.list_collections(args.database.as_deref()).await?;
             Ok(serde_json::json!({"collections": names}))
         })
@@ -483,10 +617,14 @@ impl DsServer {
         description = "List indexes on a MongoDB collection.",
         annotations(read_only_hint = true)
     )]
-    async fn list_indexes(&self, Parameters(args): Parameters<CollectionArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn list_indexes(
+        &self,
+        Parameters(args): Parameters<CollectionArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let m = unwrap_or_return!(as_mongo(&src, &args.source));
-        self.run(async move {
+        self.run(timeout, async move {
             let indexes = m
                 .list_indexes(args.database.as_deref(), &args.collection)
                 .await?;
@@ -498,14 +636,18 @@ impl DsServer {
     #[tool(
         description = "Insert one or more documents into a MongoDB collection. documents is an Extended JSON array."
     )]
-    async fn insert(&self, Parameters(args): Parameters<InsertArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn insert(
+        &self,
+        Parameters(args): Parameters<InsertArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let m = unwrap_or_return!(writable_mongo(&src, &args.source));
         let documents = unwrap_or_return!(doc_array(args.documents));
         if documents.is_empty() {
             return err("documents is empty");
         }
-        self.run(async move {
+        self.run(timeout, async move {
             let ids = m
                 .insert(args.database.as_deref(), &args.collection, documents)
                 .await?;
@@ -518,19 +660,26 @@ impl DsServer {
         description = "Update documents in a MongoDB collection. Updates one document unless many=true.",
         annotations(destructive_hint = true)
     )]
-    async fn update(&self, Parameters(args): Parameters<UpdateArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn update(
+        &self,
+        Parameters(args): Parameters<UpdateArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let m = unwrap_or_return!(writable_mongo(&src, &args.source));
         let filter = unwrap_or_return!(req_doc(args.filter, "filter"));
         let update = unwrap_or_return!(req_doc(args.update, "update"));
-        self.run(m.update(
-            args.database.as_deref(),
-            &args.collection,
-            filter,
-            update,
-            args.many.unwrap_or(false),
-            args.upsert.unwrap_or(false),
-        ))
+        self.run(
+            timeout,
+            m.update(
+                args.database.as_deref(),
+                &args.collection,
+                filter,
+                update,
+                args.many.unwrap_or(false),
+                args.upsert.unwrap_or(false),
+            ),
+        )
         .await
     }
 
@@ -538,8 +687,12 @@ impl DsServer {
         description = "Delete documents from a MongoDB collection. Deletes one document unless many=true. filter must be non-empty.",
         annotations(destructive_hint = true)
     )]
-    async fn delete(&self, Parameters(args): Parameters<DeleteArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn delete(
+        &self,
+        Parameters(args): Parameters<DeleteArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let m = unwrap_or_return!(writable_mongo(&src, &args.source));
         let filter = unwrap_or_return!(req_doc(args.filter, "filter"));
         if filter.is_empty() {
@@ -548,21 +701,28 @@ impl DsServer {
                  (or drop_collection to remove everything)",
             );
         }
-        self.run(m.delete(
-            args.database.as_deref(),
-            &args.collection,
-            filter,
-            args.many.unwrap_or(false),
-        ))
+        self.run(
+            timeout,
+            m.delete(
+                args.database.as_deref(),
+                &args.collection,
+                filter,
+                args.many.unwrap_or(false),
+            ),
+        )
         .await
     }
 
     #[tool(description = "Create an index on a MongoDB collection.")]
-    async fn create_index(&self, Parameters(args): Parameters<CreateIndexArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn create_index(
+        &self,
+        Parameters(args): Parameters<CreateIndexArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let m = unwrap_or_return!(writable_mongo(&src, &args.source));
         let keys = unwrap_or_return!(req_doc(args.keys, "keys"));
-        self.run(async move {
+        self.run(timeout, async move {
             let name = m
                 .create_index(
                     args.database.as_deref(),
@@ -581,10 +741,14 @@ impl DsServer {
         description = "Drop an index from a MongoDB collection.",
         annotations(destructive_hint = true)
     )]
-    async fn drop_index(&self, Parameters(args): Parameters<DropIndexArgs>) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+    async fn drop_index(
+        &self,
+        Parameters(args): Parameters<DropIndexArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let (src, timeout) = src!(self, ctx, args.source);
         let m = unwrap_or_return!(writable_mongo(&src, &args.source));
-        self.run(async move {
+        self.run(timeout, async move {
             m.drop_index(args.database.as_deref(), &args.collection, &args.name)
                 .await?;
             Ok(serde_json::json!({"dropped": args.name}))
@@ -596,10 +760,11 @@ impl DsServer {
     async fn create_collection(
         &self,
         Parameters(args): Parameters<CollectionArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+        let (src, timeout) = src!(self, ctx, args.source);
         let m = unwrap_or_return!(writable_mongo(&src, &args.source));
-        self.run(async move {
+        self.run(timeout, async move {
             m.create_collection(args.database.as_deref(), &args.collection)
                 .await?;
             Ok(serde_json::json!({"created": args.collection}))
@@ -614,10 +779,11 @@ impl DsServer {
     async fn drop_collection(
         &self,
         Parameters(args): Parameters<CollectionArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let src = sql_src!(self, args.source);
+        let (src, timeout) = src!(self, ctx, args.source);
         let m = unwrap_or_return!(writable_mongo(&src, &args.source));
-        self.run(async move {
+        self.run(timeout, async move {
             m.drop_collection(args.database.as_deref(), &args.collection)
                 .await?;
             Ok(serde_json::json!({"dropped": args.collection}))
@@ -628,6 +794,10 @@ impl DsServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for DsServer {
+    async fn on_roots_list_changed(&self, _context: NotificationContext<RoleServer>) {
+        *self.roots_cache.lock().await = None;
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "DataStore MCP exposes named database sources (SQL and document engines). \
