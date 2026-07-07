@@ -1,0 +1,20 @@
+# Maintainer: Alexander Bugge Stage <alexander.bugge.stage@gmail.com>
+# Binary release of ds-mcp. Publish to AUR as ds-mcp-bin; update pkgver +
+# sha256sums from the release's checksums.txt.
+pkgname=ds-mcp-bin
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Multi-engine data-source MCP server (MySQL/MariaDB, Postgres, SQLite, DuckDB, MSSQL, ClickHouse, MongoDB, Redis)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/stubbedev/ds-mcp"
+license=('MIT')
+provides=('ds-mcp')
+conflicts=('ds-mcp')
+source_x86_64=("$url/releases/download/v$pkgver/ds-mcp_v${pkgver}_x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("$url/releases/download/v$pkgver/ds-mcp_v${pkgver}_aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+  install -Dm755 ds-mcp "$pkgdir/usr/bin/ds-mcp"
+}

@@ -14,7 +14,9 @@ fn main() {
             .parent()
             .expect("libstdc++.a has a parent dir");
         println!("cargo:rustc-link-search=native={}", dir.display());
-        println!("cargo:rustc-link-lib=static=stdc++");
+        // As a trailing link-arg (not rustc-link-lib) so the archive is
+        // scanned after every object that needs it, regardless of linker.
+        println!("cargo:rustc-link-arg=-l:libstdc++.a");
         println!("cargo:rustc-link-arg=-static-libgcc");
     }
 }
