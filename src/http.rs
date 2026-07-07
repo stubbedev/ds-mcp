@@ -66,6 +66,7 @@ pub async fn serve(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn shutdown_signal() {
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("install SIGTERM handler");
@@ -73,4 +74,9 @@ async fn shutdown_signal() {
         _ = tokio::signal::ctrl_c() => {}
         _ = sigterm.recv() => {}
     }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }

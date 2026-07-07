@@ -18,5 +18,8 @@ fn main() {
         // scanned after every object that needs it, regardless of linker.
         println!("cargo:rustc-link-arg=-l:libstdc++.a");
         println!("cargo:rustc-link-arg=-static-libgcc");
+        // libstdc++.a pulls libgcc helpers (e.g. aarch64 outline atomics);
+        // scan libgcc again after it.
+        println!("cargo:rustc-link-arg=-lgcc");
     }
 }

@@ -151,6 +151,7 @@ async fn authenticate(session: &mut client::Handle<HostKeyCheck>, cfg: &SshConfi
             return Ok(());
         }
     }
+    #[cfg(unix)]
     if cfg.use_agent {
         let mut agent = russh::keys::agent::client::AgentClient::connect_env()
             .await
@@ -169,6 +170,10 @@ async fn authenticate(session: &mut client::Handle<HostKeyCheck>, cfg: &SshConfi
                 return Ok(());
             }
         }
+    }
+    #[cfg(not(unix))]
+    if cfg.use_agent {
+        tracing::warn!("ssh use_agent is not supported on this platform; skipping agent auth");
     }
     if let Some(password) = &cfg.password
         && session
