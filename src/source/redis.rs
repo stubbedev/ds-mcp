@@ -122,24 +122,33 @@ impl RedisSource {
         let conn = self
             .conn
             .get_or_try_init(|| async {
+                let set_tunnel = |t| {
+                    let _ = self.tunnel.set(t);
+                };
                 let url = match &self.cfg.dsn {
-                    Some(dsn) => dsn.clone(),
+                    Some(dsn) => {
+                        let mut parsed = url::Url::parse(dsn).context("parse redis dsn")?;
+                        let host = parsed.host_str().unwrap_or("127.0.0.1").to_string();
+                        let port = parsed.port().unwrap_or(6379);
+                        let ep = super::endpoint::resolve(&self.cfg, &host, port).await?;
+                        let _ = parsed.set_host(Some(&ep.host));
+                        let _ = parsed.set_port(Some(ep.port));
+                        if let Some(t) = ep.tunnel {
+                            set_tunnel(t);
+                        }
+                        parsed.to_string()
+                    }
                     None => {
-                        let (host, port) = match &self.cfg.ssh {
-                            Some(ssh) => {
-                                let target = self.cfg.host.as_deref().unwrap_or("127.0.0.1");
-                                let tunnel =
-                                    super::ssh::open(ssh, target, self.cfg.port.unwrap_or(6379))
-                                        .await?;
-                                let addr = tunnel.local_addr;
-                                let _ = self.tunnel.set(tunnel);
-                                (addr.ip().to_string(), addr.port())
-                            }
-                            None => (
-                                self.cfg.host.clone().unwrap_or_else(|| "127.0.0.1".into()),
-                                self.cfg.port.unwrap_or(6379),
-                            ),
-                        };
+                        let target = self.cfg.host.as_deref().unwrap_or("127.0.0.1");
+                        let ep = super::endpoint::resolve(
+                            &self.cfg,
+                            target,
+                            self.cfg.port.unwrap_or(6379),
+                        )
+                        .await?;
+                        if let Some(t) = ep.tunnel {
+                            set_tunnel(t);
+                        }
                         let auth = self
                             .cfg
                             .password
@@ -147,7 +156,7 @@ impl RedisSource {
                             .map(|p| format!(":{p}@"))
                             .unwrap_or_default();
                         let db = self.cfg.database.as_deref().unwrap_or("0");
-                        format!("redis://{auth}{host}:{port}/{db}")
+                        format!("redis://{auth}{}:{}/{db}", ep.host, ep.port)
                     }
                 };
                 let client = redis::Client::open(url.as_str())?;

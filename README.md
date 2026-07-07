@@ -44,20 +44,26 @@ generated [config.schema.json](config.schema.json).
 Per source: `engine` (`mysql` | `mariadb` | `postgres` | `sqlite` | `duckdb` |
 `mssql` | `clickhouse` | `redis` | `mongodb`), discrete `host`/`port`/`user`/`password`/`database` fields or a
 full `dsn` (alias `uri`), `readonly`, a `description` the model uses to pick
-the right source, `path` for sqlite/duckdb files, `default_database` for mongo, and
-an optional `ssh` tunnel:
+the right source, `path` for sqlite/duckdb files, and `default_database` for
+mongo. Everything defaults sanely: a bare `{"engine": "postgres"}` connects
+to localhost on the default port. In per-repo `.ds-mcp.json` files, relative
+paths (`path`, ssh key files) resolve against the config file's directory.
+
+Each source can reach its database through an `ssh` tunnel or a `docker`
+container:
 
 ```json
-"ssh": {
-  "host": "bastion.example.com",
-  "user": "deploy",
-  "identity_file": "~/.ssh/id_ed25519"
-}
+"ssh":    { "host": "bastion.example.com", "user": "deploy" }
+"docker": { "container": "myapp-postgres-1" }
 ```
 
-Host keys are verified against `~/.ssh/known_hosts` (override with
-`known_hosts_file`); auth tries `identity_file`, then the ssh-agent
-(`use_agent`), then `password`. `${ENV_VAR}` references in secret-bearing
+`ssh` tunnels combine with `dsn` too (the dsn's host is dialed through the
+tunnel). Host keys are verified against `~/.ssh/known_hosts` (override with
+`known_hosts_file`); auth tries `identity_file`, then the ssh-agent, then
+`password` — with nothing configured, the agent and `~/.ssh` default keys
+are tried automatically. `docker` dials the container's published port (or
+the container IP for unpublished ones); `port` picks the in-container port
+when it isn't the engine default. `${ENV_VAR}` references in secret-bearing
 fields are expanded at load time. Tunneled mongo sources are forced to
 `directConnection` — point the URI at one reachable host.
 

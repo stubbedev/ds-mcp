@@ -130,11 +130,22 @@ pub struct SourceConfig {
     pub connect_timeout_seconds: Option<u64>,
     /// SSH tunnel: the database is dialed through this host.
     pub ssh: Option<SshConfig>,
+    /// Docker container the database runs in: the published port (or the
+    /// container IP) is dialed instead of host/port.
+    pub docker: Option<DockerConfig>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)] // read by the tunnel dialer (phase 4)
+pub struct DockerConfig {
+    /// Container name or id.
+    pub container: String,
+    /// Port inside the container; defaults to the engine's default port.
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SshConfig {
     pub host: String,
     /// Default 22.
@@ -147,7 +158,9 @@ pub struct SshConfig {
     pub identity_file: Option<String>,
     /// Passphrase for the private key. Supports `${ENV_VAR}` expansion.
     pub passphrase: Option<String>,
-    /// Use the running ssh-agent (SSH_AUTH_SOCK).
+    /// Use the running ssh-agent (SSH_AUTH_SOCK). With no identity_file,
+    /// password or use_agent configured, the agent and then ~/.ssh default
+    /// keys are tried automatically.
     #[serde(default)]
     pub use_agent: bool,
     /// known_hosts file used for host-key verification. Default ~/.ssh/known_hosts.
@@ -178,11 +191,35 @@ pub fn default_path_global() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("ds-mcp").join("config.json"))
 }
 
-/// Load and validate a config file.
+/// Load and validate a config file. Relative paths inside the config
+/// (sqlite/duckdb `path`, ssh `identity_file`/`known_hosts_file`) resolve
+/// against the config file's directory, so per-repo `.ds-mcp.json` files can
+/// say "./dev.db".
 pub fn load(path: &Path) -> Result<Config> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
-    parse(&raw).with_context(|| format!("config {}", path.display()))
+    let mut cfg = parse(&raw).with_context(|| format!("config {}", path.display()))?;
+    if let Some(dir) = path.parent() {
+        resolve_relative_paths(&mut cfg, dir);
+    }
+    Ok(cfg)
+}
+
+fn resolve_relative_paths(cfg: &mut Config, dir: &Path) {
+    let resolve = |v: &mut Option<String>| {
+        if let Some(p) = v
+            && !Path::new(p.as_str()).is_absolute()
+        {
+            *v = Some(dir.join(p.as_str()).to_string_lossy().into_owned());
+        }
+    };
+    for src in cfg.sources.values_mut() {
+        resolve(&mut src.path);
+        if let Some(ssh) = &mut src.ssh {
+            resolve(&mut ssh.identity_file);
+            resolve(&mut ssh.known_hosts_file);
+        }
+    }
 }
 
 pub fn parse(raw: &str) -> Result<Config> {
@@ -269,24 +306,18 @@ fn validate_source(src: &SourceConfig) -> Result<()> {
             if src.path.is_none() && src.dsn.is_none() {
                 bail!("{} needs `path`", src.engine.name());
             }
-            if src.ssh.is_some() {
-                bail!("{} is a local file; ssh makes no sense", src.engine.name());
+            if src.ssh.is_some() || src.docker.is_some() {
+                bail!(
+                    "{} is a local file; ssh/docker make no sense",
+                    src.engine.name()
+                );
             }
         }
-        EngineKind::MongoDb => {
-            if src.dsn.is_none() {
-                bail!("mongodb needs `uri` (mongodb:// connection string)");
-            }
-        }
+        // Everything else defaults to localhost + the engine's default port,
+        // so a bare {"engine": "..."} is valid.
         _ => {
             if src.dsn.is_some() && src.host.is_some() {
-                bail!("`dsn` and `host` are mutually exclusive");
-            }
-            if src.dsn.is_none() && src.host.is_none() {
-                bail!("need either `dsn` or `host`");
-            }
-            if src.dsn.is_some() && src.ssh.is_some() {
-                bail!("`dsn` cannot be combined with `ssh`; use discrete host/port fields");
+                bail!("`dsn` and `host` are mutually exclusive; put the host in the dsn");
             }
         }
     }
@@ -296,12 +327,8 @@ fn validate_source(src: &SourceConfig) -> Result<()> {
     if src.engine != EngineKind::MongoDb && src.default_database.is_some() {
         bail!("`default_database` is mongodb-only; use `database`");
     }
-    if let Some(ssh) = &src.ssh
-        && !ssh.use_agent
-        && ssh.identity_file.is_none()
-        && ssh.password.is_none()
-    {
-        bail!("ssh needs one of identity_file, password or use_agent");
+    if src.ssh.is_some() && src.docker.is_some() {
+        bail!("`ssh` and `docker` are mutually exclusive");
     }
     Ok(())
 }
@@ -339,19 +366,49 @@ mod tests {
     }
 
     #[test]
-    fn dsn_xor_host() {
+    fn dsn_and_host_conflict() {
         assert!(parse(&minimal("mysql", r#","dsn":"mysql://x","host":"y""#)).is_err());
-        assert!(parse(&minimal("mysql", "")).is_err());
+        // Bare engine works: localhost + default port.
+        assert!(parse(&minimal("mysql", "")).is_ok());
+        assert!(parse(&minimal("mongodb", "")).is_ok());
     }
 
     #[test]
-    fn dsn_and_ssh_rejected() {
+    fn dsn_with_ssh_allowed() {
+        assert!(
+            parse(&minimal(
+                "postgres",
+                r#","dsn":"postgres://x","ssh":{"host":"b","user":"u","use_agent":true}"#,
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn ssh_and_docker_conflict() {
         let e = parse(&minimal(
-            "postgres",
-            r#","dsn":"postgres://x","ssh":{"host":"b","user":"u","use_agent":true}"#,
+            "mysql",
+            r#","ssh":{"host":"b","user":"u"},"docker":{"container":"db"}"#,
         ))
         .unwrap_err();
-        assert!(format!("{e:#}").contains("ssh"), "{e}");
+        assert!(format!("{e:#}").contains("mutually exclusive"), "{e}");
+    }
+
+    #[test]
+    fn relative_paths_resolve_against_config_dir() {
+        let dir = std::env::temp_dir().join(format!("ds-mcp-relcfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.json");
+        std::fs::write(
+            &cfg_path,
+            r#"{"sources":{"s":{"engine":"sqlite","path":"data/dev.db"}}}"#,
+        )
+        .unwrap();
+        let cfg = load(&cfg_path).unwrap();
+        assert_eq!(
+            cfg.sources["s"].path.as_deref(),
+            dir.join("data/dev.db").to_str(),
+        );
     }
 
     #[test]
@@ -383,12 +440,14 @@ mod tests {
     }
 
     #[test]
-    fn ssh_needs_auth_method() {
-        let e = parse(&minimal(
-            "mysql",
-            r#","host":"h","ssh":{"host":"b","user":"u"}"#,
-        ))
-        .unwrap_err();
-        assert!(format!("{e:#}").contains("identity_file"), "{e}");
+    fn ssh_without_auth_config_is_valid() {
+        // Auth falls back to the agent / default keys at connect time.
+        assert!(
+            parse(&minimal(
+                "mysql",
+                r#","host":"h","ssh":{"host":"b","user":"u"}"#
+            ))
+            .is_ok()
+        );
     }
 }

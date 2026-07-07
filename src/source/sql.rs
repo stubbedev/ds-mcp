@@ -96,7 +96,6 @@ impl SqlSource {
                 .idle_timeout(std::time::Duration::from_secs(300))
                 .acquire_timeout(cfg.connect_timeout())
         }
-        // With ssh configured, everything dials the local forward instead.
         let default_port = match cfg.engine {
             EngineKind::MySql | EngineKind::MariaDb => 3306,
             EngineKind::Postgres => 5432,
@@ -104,26 +103,25 @@ impl SqlSource {
             EngineKind::ClickHouse => 8123,
             _ => 0, // file engines
         };
-        let (host, port) = match &cfg.ssh {
-            Some(ssh) => {
-                let target = cfg.host.as_deref().unwrap_or("127.0.0.1");
-                let tunnel =
-                    super::ssh::open(ssh, target, cfg.port.unwrap_or(default_port)).await?;
-                let addr = tunnel.local_addr;
-                let _ = self.tunnel.set(tunnel);
-                (addr.ip().to_string(), addr.port())
+        // The target the database listens on (from host/port fields, or the
+        // dsn below); ssh/docker blocks reroute the dial to a forward.
+        let target_host = cfg.host.clone().unwrap_or_else(|| "127.0.0.1".into());
+        let target_port = cfg.port.unwrap_or(default_port);
+        // Resolve for engines whose target comes from discrete fields; the
+        // dsn cases re-resolve with the dsn's own host below.
+        let resolve = async |host: &str, port: u16| -> Result<(String, u16)> {
+            let ep = super::endpoint::resolve(cfg, host, port).await?;
+            if let Some(t) = ep.tunnel {
+                let _ = self.tunnel.set(t);
             }
-            None => (
-                cfg.host.clone().unwrap_or_else(|| "127.0.0.1".into()),
-                cfg.port.unwrap_or(default_port),
-            ),
+            Ok((ep.host, ep.port))
         };
         Ok(match cfg.engine {
             EngineKind::MySql | EngineKind::MariaDb => {
-                let o = match &cfg.dsn {
+                let mut o = match &cfg.dsn {
                     Some(dsn) => MySqlConnectOptions::from_str(dsn)?,
                     None => {
-                        let mut o = MySqlConnectOptions::new().host(&host).port(port);
+                        let mut o = MySqlConnectOptions::new();
                         if let Some(u) = &cfg.user {
                             o = o.username(u);
                         }
@@ -133,16 +131,18 @@ impl SqlSource {
                         if let Some(d) = &cfg.database {
                             o = o.database(d);
                         }
-                        o
+                        o.host(&target_host).port(target_port)
                     }
                 };
+                let (host, port) = resolve(o.get_host(), o.get_port()).await?;
+                o = o.host(&host).port(port);
                 SqlPool::MySql(opts(cfg).connect_lazy_with(o))
             }
             EngineKind::Postgres => {
-                let o = match &cfg.dsn {
+                let mut o = match &cfg.dsn {
                     Some(dsn) => PgConnectOptions::from_str(dsn)?,
                     None => {
-                        let mut o = PgConnectOptions::new().host(&host).port(port);
+                        let mut o = PgConnectOptions::new();
                         if let Some(u) = &cfg.user {
                             o = o.username(u);
                         }
@@ -152,9 +152,11 @@ impl SqlSource {
                         if let Some(d) = &cfg.database {
                             o = o.database(d);
                         }
-                        o
+                        o.host(&target_host).port(target_port)
                     }
                 };
+                let (host, port) = resolve(o.get_host(), o.get_port()).await?;
+                o = o.host(&host).port(port);
                 SqlPool::Pg(opts(cfg).connect_lazy_with(o))
             }
             EngineKind::Sqlite => {
@@ -184,29 +186,48 @@ impl SqlSource {
                 SqlPool::DuckDb(std::sync::Arc::new(std::sync::Mutex::new(conn)))
             }
             EngineKind::Mssql => {
-                let mut m = match &cfg.dsn {
+                let (mut m, target) = match &cfg.dsn {
                     // ADO connection string; TrustServerCertificate etc. go here.
-                    Some(dsn) => deadpool_tiberius::Manager::from_ado_string(dsn)?,
+                    Some(dsn) => {
+                        let addr = tiberius::Config::from_ado_string(dsn)?.get_addr();
+                        let (h, p) = addr.rsplit_once(':').unwrap_or((addr.as_str(), "1433"));
+                        let target = (h.to_string(), p.parse().unwrap_or(1433));
+                        (deadpool_tiberius::Manager::from_ado_string(dsn)?, target)
+                    }
                     None => {
-                        let mut m = deadpool_tiberius::Manager::new().host(&host).port(port);
+                        let mut m = deadpool_tiberius::Manager::new();
                         if let (Some(u), Some(p)) = (&cfg.user, &cfg.password) {
                             m = m.basic_authentication(u, p);
                         }
                         if let Some(d) = &cfg.database {
                             m = m.database(d);
                         }
-                        m
+                        (m, (target_host.clone(), target_port))
                     }
                 };
-                m = m.max_size(8).create_timeout(cfg.connect_timeout());
+                let (host, port) = resolve(&target.0, target.1).await?;
+                m = m
+                    .host(host)
+                    .port(port)
+                    .max_size(8)
+                    .create_timeout(cfg.connect_timeout());
                 SqlPool::Mssql(m.create_pool()?)
             }
             EngineKind::ClickHouse => {
                 // HTTP interface. dsn = full base URL (auth via URL params or
                 // https); discrete fields build one.
                 let mut url = match &cfg.dsn {
-                    Some(dsn) => dsn.clone(),
+                    Some(dsn) => {
+                        let mut parsed = url::Url::parse(dsn).context("parse clickhouse dsn")?;
+                        let dsn_host = parsed.host_str().unwrap_or("127.0.0.1").to_string();
+                        let dsn_port = parsed.port().unwrap_or(8123);
+                        let (host, port) = resolve(&dsn_host, dsn_port).await?;
+                        let _ = parsed.set_host(Some(&host));
+                        let _ = parsed.set_port(Some(port));
+                        parsed.to_string()
+                    }
                     None => {
+                        let (host, port) = resolve(&target_host, target_port).await?;
                         let mut url = format!("http://{host}:{port}/?");
                         if let Some(u) = &cfg.user {
                             url.push_str(&format!("user={u}&"));

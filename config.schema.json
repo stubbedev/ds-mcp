@@ -161,6 +161,17 @@
               "type": "null"
             }
           ]
+        },
+        "docker": {
+          "description": "Docker container the database runs in: the published port (or the\ncontainer IP) is dialed instead of host/port.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DockerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -221,7 +232,7 @@
           ]
         },
         "use_agent": {
-          "description": "Use the running ssh-agent (SSH_AUTH_SOCK).",
+          "description": "Use the running ssh-agent (SSH_AUTH_SOCK). With no identity_file,\npassword or use_agent configured, the agent and then ~/.ssh default\nkeys are tried automatically.",
           "type": "boolean",
           "default": false
         },
@@ -242,6 +253,29 @@
       "required": [
         "host",
         "user"
+      ]
+    },
+    "DockerConfig": {
+      "type": "object",
+      "properties": {
+        "container": {
+          "description": "Container name or id.",
+          "type": "string"
+        },
+        "port": {
+          "description": "Port inside the container; defaults to the engine's default port.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "container"
       ]
     }
   }

@@ -134,11 +134,33 @@ pub async fn open(cfg: &SshConfig, target_host: &str, target_port: u16) -> Resul
     Ok(SshTunnel { local_addr, task })
 }
 
-/// Try identity file, then agent, then password — first success wins.
+/// Try identity file, then agent, then password — first success wins. With
+/// nothing configured, fall back to the usual ~/.ssh default keys and then
+/// the agent, like OpenSSH would.
 async fn authenticate(session: &mut client::Handle<HostKeyCheck>, cfg: &SshConfig) -> Result<()> {
-    if let Some(file) = &cfg.identity_file {
-        let key = russh::keys::load_secret_key(file, cfg.passphrase.as_deref())
-            .with_context(|| format!("load ssh key {file}"))?;
+    let nothing_configured =
+        cfg.identity_file.is_none() && cfg.password.is_none() && !cfg.use_agent;
+
+    let mut identities: Vec<String> = cfg.identity_file.clone().into_iter().collect();
+    if nothing_configured && let Some(home) = dirs::home_dir() {
+        for name in ["id_ed25519", "id_rsa", "id_ecdsa"] {
+            let p = home.join(".ssh").join(name);
+            if p.exists() {
+                identities.push(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    for file in &identities {
+        // Explicitly configured key that fails to load is fatal; a default
+        // key that needs a passphrase is just skipped.
+        let key = match russh::keys::load_secret_key(file, cfg.passphrase.as_deref()) {
+            Ok(k) => k,
+            Err(e) if nothing_configured => {
+                tracing::debug!("skipping default key {file}: {e}");
+                continue;
+            }
+            Err(e) => return Err(e).with_context(|| format!("load ssh key {file}")),
+        };
         let hash = session.best_supported_rsa_hash().await?.flatten();
         if session
             .authenticate_publickey(
@@ -152,10 +174,17 @@ async fn authenticate(session: &mut client::Handle<HostKeyCheck>, cfg: &SshConfi
         }
     }
     #[cfg(unix)]
-    if cfg.use_agent {
-        let mut agent = russh::keys::agent::client::AgentClient::connect_env()
-            .await
-            .context("connect to ssh-agent (SSH_AUTH_SOCK)")?;
+    if cfg.use_agent || nothing_configured {
+        let agent = russh::keys::agent::client::AgentClient::connect_env().await;
+        let mut agent = match agent {
+            Ok(a) => a,
+            // No agent running is only an error when explicitly requested.
+            Err(e) if nothing_configured => {
+                tracing::debug!("no ssh-agent: {e}");
+                return auth_failed(cfg);
+            }
+            Err(e) => return Err(e).context("connect to ssh-agent (SSH_AUTH_SOCK)"),
+        };
         for identity in agent.request_identities().await? {
             let russh::keys::agent::AgentIdentity::PublicKey { key, .. } = identity else {
                 continue;
@@ -183,19 +212,28 @@ async fn authenticate(session: &mut client::Handle<HostKeyCheck>, cfg: &SshConfi
     {
         return Ok(());
     }
+    auth_failed(cfg)
+}
+
+fn auth_failed(cfg: &SshConfig) -> Result<()> {
+    let tried: Vec<&str> =
+        if cfg.identity_file.is_none() && cfg.password.is_none() && !cfg.use_agent {
+            vec!["ssh-agent", "~/.ssh default keys"]
+        } else {
+            [
+                cfg.identity_file.as_ref().map(|_| "identity_file"),
+                cfg.use_agent.then_some("agent"),
+                cfg.password.as_ref().map(|_| "password"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect()
+        };
     bail!(
         "ssh authentication as {}@{} failed (tried: {})",
         cfg.user,
         cfg.host,
-        [
-            cfg.identity_file.as_ref().map(|_| "identity_file"),
-            cfg.use_agent.then_some("agent"),
-            cfg.password.as_ref().map(|_| "password"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(", ")
+        tried.join(", ")
     )
 }
 

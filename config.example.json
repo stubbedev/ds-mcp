@@ -40,6 +40,14 @@
       "description": "Local document store; safe to read and write.",
       "uri": "mongodb://localhost:27017",
       "default_database": "test"
+    },
+    "compose_db": {
+      "engine": "postgres",
+      "description": "The postgres container from this repo's docker-compose.",
+      "user": "postgres",
+      "password": "${COMPOSE_DB_PASSWORD}",
+      "database": "app",
+      "docker": { "container": "myapp-postgres-1" }
     }
   }
 }

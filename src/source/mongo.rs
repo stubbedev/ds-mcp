@@ -70,29 +70,48 @@ impl MongoSource {
         }
     }
 
+    /// Connection string from the config: the dsn verbatim, or one built
+    /// from host/port/user/password/database (defaults: localhost:27017).
+    fn uri(&self) -> String {
+        if let Some(dsn) = &self.cfg.dsn {
+            return dsn.clone();
+        }
+        let auth = match (&self.cfg.user, &self.cfg.password) {
+            (Some(u), Some(p)) => format!("{u}:{p}@"),
+            (Some(u), None) => format!("{u}@"),
+            _ => String::new(),
+        };
+        let host = self.cfg.host.as_deref().unwrap_or("127.0.0.1");
+        let port = self.cfg.port.unwrap_or(27017);
+        let db = self.cfg.database.as_deref().unwrap_or("");
+        format!("mongodb://{auth}{host}:{port}/{db}")
+    }
+
     async fn client(&self) -> Result<&Client> {
         self.client
             .get_or_try_init(|| async {
-                let uri = self.cfg.dsn.as_deref().expect("validated: mongodb has uri");
-                let mut opts = ClientOptions::parse(uri).await?;
+                let mut opts = ClientOptions::parse(self.uri()).await?;
                 opts.connect_timeout = Some(self.cfg.connect_timeout());
                 opts.server_selection_timeout = Some(self.cfg.connect_timeout());
-                if let Some(ssh) = &self.cfg.ssh {
-                    // Tunnel to the first URI host and dial the local forward.
-                    // Replica-set discovery cannot cross a tunnel, so force a
+                if self.cfg.ssh.is_some() || self.cfg.docker.is_some() {
+                    // Reroute the first URI host through the tunnel/container.
+                    // Replica-set discovery cannot cross either, so force a
                     // direct connection.
                     let Some(mongodb::options::ServerAddress::Tcp { host, port }) =
                         opts.hosts.first().cloned()
                     else {
-                        anyhow::bail!("ssh tunnel needs a tcp host in the mongodb uri");
+                        anyhow::bail!("ssh/docker access needs a tcp host in the mongodb uri");
                     };
-                    let tunnel = super::ssh::open(ssh, &host, port.unwrap_or(27017)).await?;
+                    let ep =
+                        super::endpoint::resolve(&self.cfg, &host, port.unwrap_or(27017)).await?;
                     opts.hosts = vec![mongodb::options::ServerAddress::Tcp {
-                        host: tunnel.local_addr.ip().to_string(),
-                        port: Some(tunnel.local_addr.port()),
+                        host: ep.host,
+                        port: Some(ep.port),
                     }];
                     opts.direct_connection = Some(true);
-                    let _ = self.tunnel.set(tunnel);
+                    if let Some(t) = ep.tunnel {
+                        let _ = self.tunnel.set(t);
+                    }
                 }
                 Ok::<_, anyhow::Error>(Client::with_options(opts)?)
             })

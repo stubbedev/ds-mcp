@@ -1,6 +1,7 @@
 //! A source is one named connection from the config. Two families: SQL
 //! engines and document stores. New engine = new variant + match arms.
 
+pub mod endpoint;
 pub mod mongo;
 pub mod redis;
 pub mod sql;
