@@ -1,0 +1,45 @@
+{
+  "$schema": "https://github.com/stubbedev/ds-mcp/raw/master/config.schema.json",
+  "http": {
+    "addr": "127.0.0.1:7100",
+    "path": "/mcp"
+  },
+  "sources": {
+    "local": {
+      "engine": "mysql",
+      "description": "Local development database for the app. Safe to read; treat as disposable.",
+      "host": "127.0.0.1",
+      "port": 3306,
+      "user": "root",
+      "password": "${LOCAL_DB_PASSWORD}",
+      "database": "app",
+      "readonly": true
+    },
+    "analytics": {
+      "engine": "postgres",
+      "description": "Analytics replica for reporting and BI queries. Read-only, reachable via bastion.",
+      "host": "10.0.0.5",
+      "port": 5432,
+      "user": "readonly",
+      "password": "${ANALYTICS_DB_PASSWORD}",
+      "database": "analytics",
+      "readonly": true,
+      "ssh": {
+        "host": "bastion.example.com",
+        "user": "deploy",
+        "identity_file": "~/.ssh/id_ed25519"
+      }
+    },
+    "scratch": {
+      "engine": "sqlite",
+      "description": "Throwaway local scratch database.",
+      "path": "~/scratch.db"
+    },
+    "docs": {
+      "engine": "mongodb",
+      "description": "Local document store; safe to read and write.",
+      "uri": "mongodb://localhost:27017",
+      "default_database": "test"
+    }
+  }
+}

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Build, lint & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Verify generated schema is up to date
+        run: |
+          cargo run -q -- gen-schema -o config.schema.json
+          if ! git diff --quiet config.schema.json; then
+            echo "config.schema.json is stale. Run 'just sync-schema' and commit."
+            git diff --stat config.schema.json
+            exit 1
+          fi

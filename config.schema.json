@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "JSON Schema reference; ignored at runtime.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "http": {
+      "description": "HTTP transport settings; only used with `--transport http`.",
+      "$ref": "#/$defs/HttpConfig"
+    },
+    "query_timeout_seconds": {
+      "description": "Per-query timeout in seconds. Default 30.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "sources": {
+      "description": "Named data sources. The map key is the `source` argument MCP clients\npass on every tool call.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/SourceConfig"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "EngineKind": {
+      "type": "string",
+      "enum": [
+        "mysql",
+        "mariadb",
+        "postgres",
+        "sqlite",
+        "mssql",
+        "mongodb"
+      ]
+    },
+    "HttpConfig": {
+      "type": "object",
+      "properties": {
+        "addr": {
+          "description": "Listen address. Default 127.0.0.1:7100.",
+          "type": "string",
+          "default": "127.0.0.1:7100"
+        },
+        "allowed_origins": {
+          "description": "Extra Origin/Host values to accept besides localhost. `[\"*\"]` disables\nthe check entirely (put a trusted proxy in front).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "json_response": {
+          "description": "Return plain JSON responses instead of SSE streams (stateless only).",
+          "type": "boolean",
+          "default": false
+        },
+        "path": {
+          "description": "Path the MCP endpoint is mounted at. Default /mcp.",
+          "type": "string",
+          "default": "/mcp"
+        },
+        "stateless": {
+          "description": "Run without server-side sessions (no server->client requests, so\nper-workspace roots configs do not work in this mode).",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "SourceConfig": {
+      "type": "object",
+      "properties": {
+        "connect_timeout_seconds": {
+          "description": "Connect timeout in seconds. Default 10.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "database": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "default_database": {
+          "description": "Default database for document tools (mongodb only).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "description": "Free-text description surfaced via list_sources so a model can pick\nthe right source unaided.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dsn": {
+          "description": "Full connection string (engine-native format). Mutually exclusive\nwith host/port/user/password/database. `uri` is accepted as an alias.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "engine": {
+          "description": "Database engine.",
+          "$ref": "#/$defs/EngineKind"
+        },
+        "host": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "password": {
+          "description": "Password. Supports `${ENV_VAR}` expansion.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Database file path (sqlite only). Supports `~` expansion.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "readonly": {
+          "description": "Refuse all write tools on this source.",
+          "type": "boolean",
+          "default": false
+        },
+        "ssh": {
+          "description": "SSH tunnel: the database is dialed through this host.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SshConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "user": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "engine"
+      ]
+    },
+    "SshConfig": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "identity_file": {
+          "description": "Private key file. Supports `~` expansion.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "insecure_ignore_host_key": {
+          "description": "Skip host-key verification. Do not use outside throwaway environments.",
+          "type": "boolean",
+          "default": false
+        },
+        "known_hosts_file": {
+          "description": "known_hosts file used for host-key verification. Default ~/.ssh/known_hosts.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "passphrase": {
+          "description": "Passphrase for the private key. Supports `${ENV_VAR}` expansion.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "password": {
+          "description": "Password auth. Supports `${ENV_VAR}` expansion.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "port": {
+          "description": "Default 22.",
+          "type": "integer",
+          "format": "uint16",
+          "default": 22,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "use_agent": {
+          "description": "Use the running ssh-agent (SSH_AUTH_SOCK).",
+          "type": "boolean",
+          "default": false
+        },
+        "user": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "user"
+      ]
+    }
+  }
+}
