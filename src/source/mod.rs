@@ -1,6 +1,7 @@
 //! A source is one named connection from the config. Two families: SQL
 //! engines and document stores. New engine = new variant + match arms.
 
+pub mod mongo;
 pub mod sql;
 
 use serde::Serialize;
@@ -9,16 +10,17 @@ use crate::config::{EngineKind, SourceConfig};
 
 pub enum Source {
     Sql(sql::SqlSource),
-    // Mongo lands in phase 2.
+    Mongo(mongo::MongoSource),
 }
 
 impl Source {
     pub fn new(name: &str, cfg: SourceConfig, force_readonly: bool) -> anyhow::Result<Self> {
         match cfg.engine {
-            EngineKind::MongoDb => {
-                anyhow::bail!("mongodb sources are not supported yet (phase 2)")
-            }
-            EngineKind::Mssql => anyhow::bail!("mssql sources are not supported yet (phase 2)"),
+            EngineKind::MongoDb => Ok(Source::Mongo(mongo::MongoSource::new(
+                name,
+                cfg,
+                force_readonly,
+            ))),
             _ => Ok(Source::Sql(sql::SqlSource::new(name, cfg, force_readonly))),
         }
     }
@@ -26,6 +28,7 @@ impl Source {
     pub fn info(&self, name: &str) -> SourceInfo {
         let (engine, cfg, readonly) = match self {
             Source::Sql(s) => (s.engine(), s.config(), s.readonly()),
+            Source::Mongo(s) => (s.engine(), s.config(), s.readonly()),
         };
         SourceInfo {
             name: name.to_string(),
@@ -36,16 +39,31 @@ impl Source {
         }
     }
 
-    pub fn as_sql(&self, _name: &str) -> Result<&sql::SqlSource, String> {
-        // _name feeds the wrong-engine error message once Mongo lands.
+    pub fn as_sql(&self, name: &str) -> Result<&sql::SqlSource, String> {
         match self {
             Source::Sql(s) => Ok(s),
+            Source::Mongo(_) => Err(format!(
+                "source {name:?} is engine mongodb; use the document tools \
+                 (find, aggregate, count, ...)"
+            )),
+        }
+    }
+
+    pub fn as_mongo(&self, name: &str) -> Result<&mongo::MongoSource, String> {
+        match self {
+            Source::Mongo(s) => Ok(s),
+            Source::Sql(s) => Err(format!(
+                "source {name:?} is engine {}; use the SQL tools \
+                 (read_query, list_tables, ...)",
+                s.engine().name()
+            )),
         }
     }
 
     pub async fn close(&self) {
         match self {
             Source::Sql(s) => s.close().await,
+            Source::Mongo(s) => s.close().await,
         }
     }
 }

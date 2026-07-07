@@ -1,4 +1,4 @@
-//! SQL-family sources: mysql/mariadb, postgres, sqlite (mssql in phase 2).
+//! SQL-family sources: mysql/mariadb, postgres, sqlite, mssql.
 //! One lazily-connected pool per source; rows are decoded to JSON with a
 //! per-engine try-decode chain (sqlx has no generic runtime decode).
 
@@ -28,6 +28,7 @@ pub enum SqlPool {
     MySql(MySqlPool),
     Pg(PgPool),
     Sqlite(SqlitePool),
+    Mssql(deadpool_tiberius::Pool),
 }
 
 impl SqlSource {
@@ -58,6 +59,7 @@ impl SqlSource {
             Some(SqlPool::MySql(p)) => p.close().await,
             Some(SqlPool::Pg(p)) => p.close().await,
             Some(SqlPool::Sqlite(p)) => p.close().await,
+            Some(SqlPool::Mssql(p)) => p.close(),
             None => {}
         }
     }
@@ -132,7 +134,27 @@ impl SqlSource {
                 let o = o.read_only(self.readonly);
                 SqlPool::Sqlite(opts(cfg).connect_lazy_with(o))
             }
-            EngineKind::Mssql | EngineKind::MongoDb => {
+            EngineKind::Mssql => {
+                let mut m = match &cfg.dsn {
+                    // ADO connection string; TrustServerCertificate etc. go here.
+                    Some(dsn) => deadpool_tiberius::Manager::from_ado_string(dsn)?,
+                    None => {
+                        let mut m = deadpool_tiberius::Manager::new()
+                            .host(cfg.host.as_deref().unwrap_or("127.0.0.1"))
+                            .port(cfg.port.unwrap_or(1433));
+                        if let (Some(u), Some(p)) = (&cfg.user, &cfg.password) {
+                            m = m.basic_authentication(u, p);
+                        }
+                        if let Some(d) = &cfg.database {
+                            m = m.database(d);
+                        }
+                        m
+                    }
+                };
+                m = m.max_size(8).create_timeout(cfg.connect_timeout());
+                SqlPool::Mssql(m.create_pool()?)
+            }
+            EngineKind::MongoDb => {
                 bail!("engine {} not handled by SqlSource", cfg.engine.name())
             }
         })
@@ -143,11 +165,11 @@ impl SqlSource {
     /// read-only guard lives in sqlguard, not here.
     pub async fn query(&self, sql: &str, limit: usize) -> Result<ResultSet> {
         let fetch = limit + 1;
-        let sql = || AssertSqlSafe(sql.to_owned());
+        let safe = || AssertSqlSafe(sql.to_owned());
         let (columns, mut rows) = match self.pool().await? {
             SqlPool::MySql(p) => {
                 collect(
-                    sqlx::query(sql()).fetch(p),
+                    sqlx::query(safe()).fetch(p),
                     fetch,
                     columns_of_mysql,
                     mysql_value,
@@ -155,16 +177,20 @@ impl SqlSource {
                 .await?
             }
             SqlPool::Pg(p) => {
-                collect(sqlx::query(sql()).fetch(p), fetch, columns_of_pg, pg_value).await?
+                collect(sqlx::query(safe()).fetch(p), fetch, columns_of_pg, pg_value).await?
             }
             SqlPool::Sqlite(p) => {
                 collect(
-                    sqlx::query(sql()).fetch(p),
+                    sqlx::query(safe()).fetch(p),
                     fetch,
                     columns_of_sqlite,
                     sqlite_value,
                 )
                 .await?
+            }
+            SqlPool::Mssql(p) => {
+                let mut conn = p.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                mssql_collect(&mut conn, sql, fetch).await?
             }
         };
         let truncated = rows.len() > limit;
@@ -178,29 +204,68 @@ impl SqlSource {
     }
 
     pub async fn exec(&self, sql: &str) -> Result<ExecResult> {
-        let sql = || AssertSqlSafe(sql.to_owned());
+        let safe = || AssertSqlSafe(sql.to_owned());
         Ok(match self.pool().await? {
             SqlPool::MySql(p) => {
-                let r = sqlx::query(sql()).execute(p).await?;
+                let r = sqlx::query(safe()).execute(p).await?;
                 ExecResult {
                     rows_affected: r.rows_affected(),
                     last_insert_id: Some(r.last_insert_id()),
                 }
             }
             SqlPool::Pg(p) => {
-                let r = sqlx::query(sql()).execute(p).await?;
+                let r = sqlx::query(safe()).execute(p).await?;
                 ExecResult {
                     rows_affected: r.rows_affected(),
                     last_insert_id: None,
                 }
             }
             SqlPool::Sqlite(p) => {
-                let r = sqlx::query(sql()).execute(p).await?;
+                let r = sqlx::query(safe()).execute(p).await?;
                 ExecResult {
                     rows_affected: r.rows_affected(),
                     last_insert_id: u64::try_from(r.last_insert_rowid()).ok(),
                 }
             }
+            SqlPool::Mssql(p) => {
+                let mut conn = p.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                let r = conn.execute(sql.to_owned(), &[]).await?;
+                ExecResult {
+                    rows_affected: r.total(),
+                    last_insert_id: None,
+                }
+            }
+        })
+    }
+
+    /// EXPLAIN. MSSQL has no EXPLAIN prefix; it needs SHOWPLAN_ALL toggled
+    /// around the statement on one connection.
+    pub async fn explain(&self, sql: &str, limit: usize) -> Result<ResultSet> {
+        if self.engine() != EngineKind::Mssql {
+            return self.query(&self.explain_sql(sql), limit).await;
+        }
+        let SqlPool::Mssql(p) = self.pool().await? else {
+            unreachable!()
+        };
+        let mut conn = p.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.simple_query("SET SHOWPLAN_ALL ON")
+            .await?
+            .into_results()
+            .await?;
+        let collected = mssql_collect(&mut conn, sql, limit + 1).await;
+        // Always turn SHOWPLAN back off — the connection returns to the pool.
+        let off = conn.simple_query("SET SHOWPLAN_ALL OFF").await;
+        if let Ok(stream) = off {
+            let _ = stream.into_results().await;
+        }
+        let (columns, mut rows) = collected?;
+        let truncated = rows.len() > limit;
+        rows.truncate(limit);
+        Ok(ResultSet {
+            columns,
+            row_count: rows.len(),
+            rows,
+            truncated,
         })
     }
 
@@ -211,7 +276,8 @@ impl SqlSource {
                 "SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY datname"
             }
             EngineKind::Sqlite => "PRAGMA database_list",
-            _ => unreachable!(),
+            EngineKind::Mssql => "SELECT name FROM sys.databases ORDER BY name",
+            EngineKind::MongoDb => unreachable!(),
         }
     }
 
@@ -237,7 +303,16 @@ impl SqlSource {
             EngineKind::Sqlite => {
                 "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name".into()
             }
-            _ => unreachable!(),
+            EngineKind::Mssql => {
+                let prefix = db
+                    .map(|d| format!("{}.", quote_ident_bracket(d)))
+                    .unwrap_or_default();
+                format!(
+                    "SELECT table_schema, table_name FROM {prefix}information_schema.tables \
+                     WHERE table_type = 'BASE TABLE' ORDER BY 1, 2"
+                )
+            }
+            EngineKind::MongoDb => unreachable!(),
         }
     }
 
@@ -265,7 +340,18 @@ impl SqlSource {
                 )
             }
             EngineKind::Sqlite => format!("PRAGMA table_info({})", quote_ident_dq(table)),
-            _ => unreachable!(),
+            EngineKind::Mssql => {
+                let prefix = db
+                    .map(|d| format!("{}.", quote_ident_bracket(d)))
+                    .unwrap_or_default();
+                format!(
+                    "SELECT column_name, data_type, is_nullable, column_default \
+                     FROM {prefix}information_schema.columns WHERE table_name = {} \
+                     ORDER BY ordinal_position",
+                    quote_literal(table)
+                )
+            }
+            EngineKind::MongoDb => unreachable!(),
         }
     }
 
@@ -283,6 +369,10 @@ fn quote_ident_mysql(s: &str) -> String {
 
 fn quote_ident_dq(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+fn quote_ident_bracket(s: &str) -> String {
+    format!("[{}]", s.replace(']', "]]"))
 }
 
 fn quote_literal(s: &str) -> String {
@@ -307,6 +397,82 @@ async fn collect<R>(
         }
     }
     Ok((columns, rows))
+}
+
+async fn mssql_collect(
+    conn: &mut deadpool_tiberius::Client,
+    sql: &str,
+    fetch: usize,
+) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    let stream = conn.simple_query(sql.to_owned()).await?;
+    let mut row_stream = stream.into_row_stream();
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows = Vec::new();
+    while let Some(row) = row_stream.try_next().await? {
+        if columns.is_empty() {
+            columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+        }
+        rows.push(mssql_row_values(&row));
+        if rows.len() >= fetch {
+            break;
+        }
+    }
+    Ok((columns, rows))
+}
+
+fn mssql_row_values(row: &tiberius::Row) -> Vec<Value> {
+    use tiberius::ColumnData as C;
+    row.cells()
+        .enumerate()
+        .map(|(i, (_, data))| match data {
+            C::U8(v) => v.map(Value::from).unwrap_or(Value::Null),
+            C::I16(v) => v.map(Value::from).unwrap_or(Value::Null),
+            C::I32(v) => v.map(Value::from).unwrap_or(Value::Null),
+            C::I64(v) => v.map(Value::from).unwrap_or(Value::Null),
+            C::F32(v) => v.map(|v| num_f64(v as f64)).unwrap_or(Value::Null),
+            C::F64(v) => v.map(num_f64).unwrap_or(Value::Null),
+            C::Bit(v) => v.map(Value::Bool).unwrap_or(Value::Null),
+            C::String(v) => v
+                .as_ref()
+                .map(|v| Value::String(v.to_string()))
+                .unwrap_or(Value::Null),
+            C::Guid(v) => v
+                .map(|v| Value::String(v.to_string()))
+                .unwrap_or(Value::Null),
+            C::Binary(v) => v
+                .as_ref()
+                .map(|v| bytes_value(v.to_vec()))
+                .unwrap_or(Value::Null),
+            C::Numeric(v) => v
+                .map(|v| Value::String(v.to_string()))
+                .unwrap_or(Value::Null),
+            C::Xml(v) => v
+                .as_ref()
+                .map(|v| Value::String(v.to_string()))
+                .unwrap_or(Value::Null),
+            // Temporal TDS types: re-decode through chrono (feature-gated
+            // FromSql impls) instead of converting raw wire structs by hand.
+            C::Date(_) => decode_time::<chrono::NaiveDate>(row, i),
+            C::Time(_) => decode_time::<chrono::NaiveTime>(row, i),
+            C::DateTime(_) | C::SmallDateTime(_) | C::DateTime2(_) => {
+                decode_time::<chrono::NaiveDateTime>(row, i)
+            }
+            C::DateTimeOffset(_) => row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>(i)
+                .ok()
+                .flatten()
+                .map(|v| Value::String(v.to_rfc3339()))
+                .unwrap_or(Value::Null),
+        })
+        .collect()
+}
+
+fn decode_time<'a, T: tiberius::FromSql<'a> + ToString>(row: &'a tiberius::Row, i: usize) -> Value {
+    row.try_get::<T, _>(i)
+        .ok()
+        .flatten()
+        .map(|v| Value::String(v.to_string()))
+        .unwrap_or(Value::Null)
 }
 
 fn columns_of_mysql(row: &MySqlRow) -> Vec<String> {
