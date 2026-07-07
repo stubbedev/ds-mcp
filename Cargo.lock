@@ -1365,6 +1365,7 @@ dependencies = [
  "clap",
  "deadpool-tiberius",
  "dirs",
+ "dotenvy",
  "duckdb",
  "futures-util",
  "http",

@@ -191,18 +191,29 @@ pub fn default_path_global() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("ds-mcp").join("config.json"))
 }
 
-/// Load and validate a config file. Relative paths inside the config
-/// (sqlite/duckdb `path`, ssh `identity_file`/`known_hosts_file`) resolve
-/// against the config file's directory, so per-repo `.ds-mcp.json` files can
-/// say "./dev.db".
+/// Load and validate a config file. A `.env` next to the config supplies
+/// `${VAR}` values (real environment variables still win), so a per-repo
+/// `.ds-mcp.json` + `.env` keep secrets out of the committed config. Relative
+/// paths inside the config (sqlite/duckdb `path`, ssh key files) resolve
+/// against the config file's directory.
 pub fn load(path: &Path) -> Result<Config> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
-    let mut cfg = parse(&raw).with_context(|| format!("config {}", path.display()))?;
-    if let Some(dir) = path.parent() {
-        resolve_relative_paths(&mut cfg, dir);
-    }
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let dotenv = load_dotenv(&dir.join(".env"));
+    let mut cfg =
+        parse_with_env(&raw, &dotenv).with_context(|| format!("config {}", path.display()))?;
+    resolve_relative_paths(&mut cfg, dir);
     Ok(cfg)
+}
+
+/// Read `.env` into a map (best effort — a missing file is fine). Values are
+/// a fallback: process environment variables take precedence.
+fn load_dotenv(path: &Path) -> BTreeMap<String, String> {
+    match dotenvy::from_path_iter(path) {
+        Ok(iter) => iter.flatten().collect(),
+        Err(_) => BTreeMap::new(),
+    }
 }
 
 fn resolve_relative_paths(cfg: &mut Config, dir: &Path) {
@@ -222,32 +233,40 @@ fn resolve_relative_paths(cfg: &mut Config, dir: &Path) {
     }
 }
 
+/// Parse + validate without a `.env` (env vars come from the process only).
+/// Used by the tests; `load` is the real entry point.
+#[cfg(test)]
 pub fn parse(raw: &str) -> Result<Config> {
+    parse_with_env(raw, &BTreeMap::new())
+}
+
+fn parse_with_env(raw: &str, dotenv: &BTreeMap<String, String>) -> Result<Config> {
     let mut cfg: Config = serde_json::from_str(raw)?;
-    expand(&mut cfg)?;
+    expand(&mut cfg, dotenv)?;
     validate(&cfg)?;
     Ok(cfg)
 }
 
 /// `${ENV_VAR}` expansion on secret-bearing fields, `~` on path fields.
-fn expand(cfg: &mut Config) -> Result<()> {
+fn expand(cfg: &mut Config, dotenv: &BTreeMap<String, String>) -> Result<()> {
     for (name, src) in &mut cfg.sources {
         let ctx = |field: &str| format!("source {name:?}: {field}");
         if let Some(v) = &src.password {
-            src.password = Some(expand_env(v).with_context(|| ctx("password"))?);
+            src.password = Some(expand_env(v, dotenv).with_context(|| ctx("password"))?);
         }
         if let Some(v) = &src.dsn {
-            src.dsn = Some(expand_env(v).with_context(|| ctx("dsn"))?);
+            src.dsn = Some(expand_env(v, dotenv).with_context(|| ctx("dsn"))?);
         }
         if let Some(v) = &src.path {
             src.path = Some(expand_tilde(v));
         }
         if let Some(ssh) = &mut src.ssh {
             if let Some(v) = &ssh.password {
-                ssh.password = Some(expand_env(v).with_context(|| ctx("ssh.password"))?);
+                ssh.password = Some(expand_env(v, dotenv).with_context(|| ctx("ssh.password"))?);
             }
             if let Some(v) = &ssh.passphrase {
-                ssh.passphrase = Some(expand_env(v).with_context(|| ctx("ssh.passphrase"))?);
+                ssh.passphrase =
+                    Some(expand_env(v, dotenv).with_context(|| ctx("ssh.passphrase"))?);
             }
             if let Some(v) = &ssh.identity_file {
                 ssh.identity_file = Some(expand_tilde(v));
@@ -260,9 +279,10 @@ fn expand(cfg: &mut Config) -> Result<()> {
     Ok(())
 }
 
-/// Expand `${VAR}` references; unset variables are an error (fail loud rather
-/// than connecting with an empty password).
-fn expand_env(s: &str) -> Result<String> {
+/// Expand `${VAR}` references, preferring the process environment and falling
+/// back to the config's sibling `.env`. Unset variables are an error (fail
+/// loud rather than connecting with an empty password).
+fn expand_env(s: &str, dotenv: &BTreeMap<String, String>) -> Result<String> {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(start) = rest.find("${") {
@@ -272,9 +292,11 @@ fn expand_env(s: &str) -> Result<String> {
             bail!("unterminated ${{ in {s:?}");
         };
         let var = &after[..end];
-        out.push_str(
-            &std::env::var(var).with_context(|| format!("environment variable {var} not set"))?,
-        );
+        let value = std::env::var(var)
+            .ok()
+            .or_else(|| dotenv.get(var).cloned())
+            .with_context(|| format!("environment variable {var} not set (and not in .env)"))?;
+        out.push_str(&value);
         rest = &after[end + 1..];
     }
     out.push_str(rest);
@@ -392,6 +414,21 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{e:#}").contains("mutually exclusive"), "{e}");
+    }
+
+    #[test]
+    fn dotenv_beside_config_supplies_vars() {
+        let dir = std::env::temp_dir().join(format!("ds-mcp-dotenv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), "DS_MCP_DOTENV_PW=fromdotenv\n").unwrap();
+        let cfg_path = dir.join("config.json");
+        std::fs::write(
+            &cfg_path,
+            r#"{"sources":{"s":{"engine":"mysql","host":"h","password":"${DS_MCP_DOTENV_PW}"}}}"#,
+        )
+        .unwrap();
+        let cfg = load(&cfg_path).unwrap();
+        assert_eq!(cfg.sources["s"].password.as_deref(), Some("fromdotenv"));
     }
 
     #[test]

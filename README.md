@@ -64,8 +64,12 @@ tunnel). Host keys are verified against `~/.ssh/known_hosts` (override with
 are tried automatically. `docker` dials the container's published port (or
 the container IP for unpublished ones); `port` picks the in-container port
 when it isn't the engine default. `${ENV_VAR}` references in secret-bearing
-fields are expanded at load time. Tunneled mongo sources are forced to
-`directConnection` — point the URI at one reachable host.
+fields (`password`, `dsn`, ssh `password`/`passphrase`) are expanded at load
+time from the process environment, falling back to a `.env` file next to the
+config (real env vars win). So a repo can commit `.ds-mcp.json` with
+`"password": "${DB_PASSWORD}"` and keep the value in a git-ignored `.env`
+beside it. Tunneled mongo sources are forced to `directConnection` — point
+the URI at one reachable host.
 
 ### Per-workspace sources (roots)
 
