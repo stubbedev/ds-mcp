@@ -77,3 +77,78 @@ jobs:
         with:
           generate_release_notes: true
           files: dist/*
+
+  # Regenerates the tap formula from this release's checksums and pushes it
+  # to stubbedev/homebrew-ds-mcp. Needs the HOMEBREW_TAP_TOKEN secret
+  # (fine-grained PAT, Contents: read/write on the tap repo only).
+  bump-tap:
+    name: bump homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/checkout@v7
+        with:
+          repository: stubbedev/homebrew-ds-mcp
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Regenerate formula
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          sum() { grep "$1" dist/checksums.txt | awk '{print $1}'; }
+          mkdir -p tap/Formula
+          cat > tap/Formula/ds-mcp.rb <<EOF
+          class DsMcp < Formula
+            desc "Multi-engine data-source MCP server (MySQL, Postgres, SQLite, DuckDB, MSSQL, ClickHouse, MongoDB, Redis)"
+            homepage "https://github.com/${GITHUB_REPOSITORY}"
+            version "${version}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${base}/ds-mcp_${GITHUB_REF_NAME}_aarch64-apple-darwin.tar.gz"
+                sha256 "$(sum aarch64-apple-darwin)"
+              else
+                url "${base}/ds-mcp_${GITHUB_REF_NAME}_x86_64-apple-darwin.tar.gz"
+                sha256 "$(sum x86_64-apple-darwin)"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "${base}/ds-mcp_${GITHUB_REF_NAME}_aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "$(sum aarch64-unknown-linux-gnu)"
+              else
+                url "${base}/ds-mcp_${GITHUB_REF_NAME}_x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "$(sum x86_64-unknown-linux-gnu)"
+              end
+            end
+
+            def install
+              bin.install "ds-mcp"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/ds-mcp --version")
+            end
+          end
+          EOF
+
+      - name: Push formula
+        run: |
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/ds-mcp.rb
+          if git diff --cached --quiet; then
+            echo "formula unchanged"
+          else
+            git commit -m "ds-mcp ${GITHUB_REF_NAME#v}"
+            git push
+          fi
