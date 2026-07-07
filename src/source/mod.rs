@@ -3,6 +3,7 @@
 
 pub mod mongo;
 pub mod sql;
+pub mod ssh;
 
 use serde::Serialize;
 

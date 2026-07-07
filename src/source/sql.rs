@@ -22,6 +22,8 @@ pub struct SqlSource {
     cfg: SourceConfig,
     readonly: bool,
     pool: OnceCell<SqlPool>,
+    /// Keeps the ssh forward alive for the life of the pool.
+    tunnel: OnceCell<super::ssh::SshTunnel>,
 }
 
 pub enum SqlPool {
@@ -39,6 +41,7 @@ impl SqlSource {
             cfg,
             readonly,
             pool: OnceCell::new(),
+            tunnel: OnceCell::new(),
         }
     }
 
@@ -80,14 +83,33 @@ impl SqlSource {
                 .idle_timeout(std::time::Duration::from_secs(300))
                 .acquire_timeout(cfg.connect_timeout())
         }
+        // With ssh configured, everything dials the local forward instead.
+        let default_port = match cfg.engine {
+            EngineKind::MySql | EngineKind::MariaDb => 3306,
+            EngineKind::Postgres => 5432,
+            EngineKind::Mssql => 1433,
+            _ => 0,
+        };
+        let (host, port) = match &cfg.ssh {
+            Some(ssh) => {
+                let target = cfg.host.as_deref().unwrap_or("127.0.0.1");
+                let tunnel =
+                    super::ssh::open(ssh, target, cfg.port.unwrap_or(default_port)).await?;
+                let addr = tunnel.local_addr;
+                let _ = self.tunnel.set(tunnel);
+                (addr.ip().to_string(), addr.port())
+            }
+            None => (
+                cfg.host.clone().unwrap_or_else(|| "127.0.0.1".into()),
+                cfg.port.unwrap_or(default_port),
+            ),
+        };
         Ok(match cfg.engine {
             EngineKind::MySql | EngineKind::MariaDb => {
                 let o = match &cfg.dsn {
                     Some(dsn) => MySqlConnectOptions::from_str(dsn)?,
                     None => {
-                        let mut o = MySqlConnectOptions::new()
-                            .host(cfg.host.as_deref().unwrap_or("127.0.0.1"))
-                            .port(cfg.port.unwrap_or(3306));
+                        let mut o = MySqlConnectOptions::new().host(&host).port(port);
                         if let Some(u) = &cfg.user {
                             o = o.username(u);
                         }
@@ -106,9 +128,7 @@ impl SqlSource {
                 let o = match &cfg.dsn {
                     Some(dsn) => PgConnectOptions::from_str(dsn)?,
                     None => {
-                        let mut o = PgConnectOptions::new()
-                            .host(cfg.host.as_deref().unwrap_or("127.0.0.1"))
-                            .port(cfg.port.unwrap_or(5432));
+                        let mut o = PgConnectOptions::new().host(&host).port(port);
                         if let Some(u) = &cfg.user {
                             o = o.username(u);
                         }
@@ -139,9 +159,7 @@ impl SqlSource {
                     // ADO connection string; TrustServerCertificate etc. go here.
                     Some(dsn) => deadpool_tiberius::Manager::from_ado_string(dsn)?,
                     None => {
-                        let mut m = deadpool_tiberius::Manager::new()
-                            .host(cfg.host.as_deref().unwrap_or("127.0.0.1"))
-                            .port(cfg.port.unwrap_or(1433));
+                        let mut m = deadpool_tiberius::Manager::new().host(&host).port(port);
                         if let (Some(u), Some(p)) = (&cfg.user, &cfg.password) {
                             m = m.basic_authentication(u, p);
                         }

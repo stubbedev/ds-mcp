@@ -17,6 +17,8 @@ pub struct MongoSource {
     cfg: SourceConfig,
     readonly: bool,
     client: OnceCell<Client>,
+    /// Keeps the ssh forward alive for the life of the client.
+    tunnel: OnceCell<super::ssh::SshTunnel>,
 }
 
 #[derive(Serialize)]
@@ -46,6 +48,7 @@ impl MongoSource {
             cfg,
             readonly,
             client: OnceCell::new(),
+            tunnel: OnceCell::new(),
         }
     }
 
@@ -74,6 +77,23 @@ impl MongoSource {
                 let mut opts = ClientOptions::parse(uri).await?;
                 opts.connect_timeout = Some(self.cfg.connect_timeout());
                 opts.server_selection_timeout = Some(self.cfg.connect_timeout());
+                if let Some(ssh) = &self.cfg.ssh {
+                    // Tunnel to the first URI host and dial the local forward.
+                    // Replica-set discovery cannot cross a tunnel, so force a
+                    // direct connection.
+                    let Some(mongodb::options::ServerAddress::Tcp { host, port }) =
+                        opts.hosts.first().cloned()
+                    else {
+                        anyhow::bail!("ssh tunnel needs a tcp host in the mongodb uri");
+                    };
+                    let tunnel = super::ssh::open(ssh, &host, port.unwrap_or(27017)).await?;
+                    opts.hosts = vec![mongodb::options::ServerAddress::Tcp {
+                        host: tunnel.local_addr.ip().to_string(),
+                        port: Some(tunnel.local_addr.port()),
+                    }];
+                    opts.direct_connection = Some(true);
+                    let _ = self.tunnel.set(tunnel);
+                }
                 Ok::<_, anyhow::Error>(Client::with_options(opts)?)
             })
             .await
