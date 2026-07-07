@@ -1,6 +1,12 @@
 {
   description = "DataStore MCP — multi-engine data-source MCP server";
 
+  nixConfig = {
+    # CI pushes every master build here; accept and skip the local rebuild.
+    extra-substituters = [ "https://nix.stubbe.dev/default" ];
+    extra-trusted-public-keys = [ "default:9P4FePqHV1rGv5NDBun0GN26y83pcaaMr/NHZrxKaac=" ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
