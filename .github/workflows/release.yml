@@ -101,7 +101,9 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
-          sum() { grep "$1" dist/checksums.txt | awk '{print $1}'; }
+          # checksums.txt is only attached to the release, not uploaded as a
+          # workflow artifact — hash the downloaded tarballs directly.
+          sum() { sha256sum "dist/ds-mcp_${GITHUB_REF_NAME}_$1.tar.gz" | awk '{print $1}'; }
           mkdir -p tap/Formula
           cat > tap/Formula/ds-mcp.rb <<EOF
           class DsMcp < Formula
