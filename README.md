@@ -5,9 +5,6 @@ MySQL/MariaDB, PostgreSQL, SQLite, DuckDB, SQL Server, ClickHouse, MongoDB
 and Redis — to MCP clients over stdio or streamable HTTP, behind a single
 unified tool surface.
 
-It replaces the separate [mysql-mcp](https://github.com/stubbedev/mysql-mcp)
-and [mongodb-mcp](https://github.com/stubbedev/mongodb-mcp) servers.
-
 ## Install
 
 ```sh
