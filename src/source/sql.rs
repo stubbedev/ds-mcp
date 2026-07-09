@@ -157,6 +157,12 @@ impl SqlSource {
                 };
                 let (host, port) = resolve(o.get_host(), o.get_port()).await?;
                 o = o.host(&host).port(port);
+                // Defense in depth: a readonly source forces every transaction
+                // read-only at the server, so even a write the SQL guard can't
+                // see (a side-effecting function like nextval()) is refused.
+                if self.readonly {
+                    o = o.options([("default_transaction_read_only", "on")]);
+                }
                 SqlPool::Pg(opts(cfg).connect_lazy_with(o))
             }
             EngineKind::Sqlite => {
@@ -246,6 +252,11 @@ impl SqlSource {
                     url.push('?');
                 } else if !url.ends_with('?') && !url.ends_with('&') {
                     url.push('&');
+                }
+                // Defense in depth: readonly=2 lets the server reject writes
+                // and DDL while still allowing SETTINGS on read queries.
+                if self.readonly {
+                    url.push_str("readonly=2&");
                 }
                 let client = reqwest::Client::builder()
                     .connect_timeout(cfg.connect_timeout())

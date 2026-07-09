@@ -65,20 +65,30 @@ pub fn command_is_read(cmd: &Document) -> Result<bool> {
         .ok_or_else(|| anyhow::anyhow!("empty command document"))?
         .to_ascii_lowercase();
     if name == "aggregate" {
-        if let Ok(pipeline) = cmd.get_array("pipeline")
-            && pipeline.iter().any(stage_writes)
-        {
+        // Fail closed: an aggregate whose pipeline we cannot inspect as an
+        // array is treated as a write (kept off the read path).
+        let Ok(pipeline) = cmd.get_array("pipeline") else {
             return Ok(false);
-        }
-        return Ok(true);
+        };
+        return Ok(!pipeline.iter().any(stage_writes));
     }
     Ok(READ_COMMANDS.contains(&name.as_str()))
 }
 
+/// Does this pipeline stage (or anything nested in it) write? `$out`/`$merge`
+/// only appear as stage operators — field names in stored docs cannot start
+/// with `$` — so scanning for those keys anywhere is safe and catches them
+/// inside `$facet`, `$unionWith`/`$lookup` sub-pipelines, etc. Genuine MongoDB
+/// rejects a writing stage in those positions, but Mongo-compatible backends
+/// (FerretDB, CosmosDB, DocumentDB) may not — so we do not rely on the server.
 fn stage_writes(stage: &Bson) -> bool {
-    stage
-        .as_document()
-        .is_some_and(|d| d.contains_key("$out") || d.contains_key("$merge"))
+    match stage {
+        Bson::Document(d) => {
+            d.contains_key("$out") || d.contains_key("$merge") || d.values().any(stage_writes)
+        }
+        Bson::Array(a) => a.iter().any(stage_writes),
+        _ => false,
+    }
 }
 
 impl MongoSource {
@@ -288,6 +298,29 @@ mod tests {
             bson::doc! {"aggregate": "t", "pipeline": [{"$out": "dest"}]}
         ));
         assert!(command_is_read(&Document::new()).is_err());
+    }
+
+    #[test]
+    fn nested_write_stages_are_caught() {
+        let read = |d: Document| command_is_read(&d).unwrap();
+        // $merge/$out nested inside $unionWith / $lookup / $facet sub-pipelines
+        // must be treated as writes (genuine MongoDB rejects them, but
+        // Mongo-compatible backends may not — the gate cannot trust the server).
+        assert!(!read(bson::doc! {"aggregate": "t", "pipeline": [
+            {"$unionWith": {"coll": "y", "pipeline": [{"$merge": "victim"}]}}
+        ]}));
+        assert!(!read(bson::doc! {"aggregate": "t", "pipeline": [
+            {"$lookup": {"from": "y", "pipeline": [{"$out": "victim"}], "as": "j"}}
+        ]}));
+        assert!(!read(bson::doc! {"aggregate": "t", "pipeline": [
+            {"$facet": {"a": [{"$merge": "victim"}]}}
+        ]}));
+        // A non-array pipeline fails closed (treated as write).
+        assert!(!read(bson::doc! {"aggregate": "t", "pipeline": "nope"}));
+        // A genuinely nested read pipeline still classifies as read.
+        assert!(read(bson::doc! {"aggregate": "t", "pipeline": [
+            {"$unionWith": {"coll": "y", "pipeline": [{"$match": {"a": 1}}]}}
+        ]}));
     }
 
     #[test]

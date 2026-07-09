@@ -63,16 +63,29 @@ const QDRANT_READ_OPS: &[&str] = &[
     "exists",
 ];
 
+/// Normalize a path exactly as the HTTP client will before it hits the wire:
+/// `reqwest` parses the URL with the `url` crate, which resolves `.`/`..` (and
+/// their percent-encoded forms) as dot segments. The read gate MUST classify
+/// that same normalized path — otherwise `POST /idx/_search/../_doc` is gated
+/// on `_search` (read) but sent as `/idx/_doc` (write). Returns None if the
+/// path will not parse, which the gate treats as a non-read (default-deny).
+fn normalized_path(path: &str) -> Option<String> {
+    let joined = format!("http://x/{}", path.trim_start_matches('/'));
+    url::Url::parse(&joined).ok().map(|u| u.path().to_string())
+}
+
 /// Is this request a read? GET/HEAD always are; POST depends on the endpoint;
 /// PUT/DELETE/PATCH always mutate. The POST classifier is the read-only
-/// boundary for the `query` tool, so it matches path *segments*, never
-/// substrings — a container name must not be able to spoof a read verb.
+/// boundary for the `query` tool, so it (a) classifies the *normalized* path
+/// the server will actually receive, and (b) matches path *segments*, never
+/// substrings — neither a `..` segment nor a container name can spoof a read.
 pub fn is_read_request(engine: EngineKind, method: &str, path: &str) -> bool {
     match method.to_ascii_uppercase().as_str() {
         "GET" | "HEAD" => true,
         "POST" => {
-            // Drop the query string, then split into non-empty segments.
-            let p = path.split('?').next().unwrap_or(path);
+            let Some(p) = normalized_path(path) else {
+                return false;
+            };
             let segs: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
             match engine {
                 EngineKind::Qdrant => {
@@ -268,6 +281,35 @@ mod tests {
         );
         // A plain source stays writable.
         assert!(!RestSource::new("s", cfg(r#"{"engine":"qdrant"}"#), false).readonly());
+    }
+
+    #[test]
+    fn path_traversal_cannot_spoof_a_read() {
+        // `..` (and its percent-encoded form) is resolved by the HTTP client
+        // before the request is sent, so the gate must classify the resolved
+        // path — a read verb followed by `../<write>` is a write.
+        for p in [
+            "/idx/_search/../_doc",
+            "/_search/../_bulk",
+            "/idx/_search/%2e%2e/_doc",
+            "/idx/_search/../_update_by_query",
+        ] {
+            assert!(!is_read_request(Elasticsearch, "POST", p), "ES {p}");
+        }
+        for p in [
+            "/collections/c/points/search/../payload",
+            "/collections/c/points/count/../../c/points/delete",
+            "/collections/c/points/query/%2e%2e/payload",
+        ] {
+            assert!(!is_read_request(Qdrant, "POST", p), "Qdrant {p}");
+        }
+        // A genuine read with no traversal still passes.
+        assert!(is_read_request(Elasticsearch, "POST", "/idx/_search"));
+        assert!(is_read_request(
+            Qdrant,
+            "POST",
+            "/collections/c/points/search"
+        ));
     }
 
     #[test]

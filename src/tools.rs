@@ -382,7 +382,7 @@ impl DsServer {
                 let Some(first) = parts.first() else {
                     return err("command is empty");
                 };
-                if !crate::source::redis::is_read_command(first) {
+                if !crate::source::redis::is_read_command(&parts) {
                     return err(format!("{first} is not a read command; use execute"));
                 }
                 self.run(timeout, async move {

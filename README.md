@@ -133,6 +133,19 @@ Anything that writes is rejected from
 writable sources — no implicit guards, so a `DELETE` without a filter deletes
 everything, exactly as that engine's shell would.
 
+A `readonly` source (or `--read-only`) refuses `execute` outright, and its
+`query` classifier is allowlist / default-deny — an unknown or unparseable
+payload is treated as a write, and the classifier inspects the exact
+statement/command/normalized-path the engine will run (so tricks like a
+data-modifying CTE, `EXPLAIN ANALYZE <write>`, a `$merge` nested in a
+sub-pipeline, `CONFIG SET`, or a `../` path segment cannot slip a write onto
+the read path). For defense in depth the readonly flag is also pushed down to
+the connection where the engine supports it — sqlite/duckdb open the file
+read-only, postgres sets `default_transaction_read_only`, clickhouse sets
+`readonly=2` — so even a side-effecting function the parser can't see is
+refused. mysql/mariadb/mssql have no equivalent per-session switch here; for a
+hard guarantee on those, point the source at a read-only database user.
+
 Reads are capped at `limit` rows/documents (default 1000) with a
 `truncated`/`has_more` flag; paginate with LIMIT/OFFSET (SQL) or skip/limit
 (mongo). MongoDB find/aggregate results are normalized to
