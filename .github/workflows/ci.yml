@@ -52,9 +52,11 @@ jobs:
       - run: nix flake check
 
       # Push the build closure to the attic cache so other machines
-      # (and future CI runs) can substitute instead of rebuilding.
+      # (and future CI runs) can substitute instead of rebuilding. Best effort:
+      # the cache being down must not fail CI — the build already succeeded.
       - name: Push to attic cache
         if: github.ref == 'refs/heads/master'
+        continue-on-error: true
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
         run: |
