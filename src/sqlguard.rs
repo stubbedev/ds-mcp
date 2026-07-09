@@ -20,8 +20,13 @@ fn dialect(kind: EngineKind) -> Box<dyn Dialect> {
         EngineKind::DuckDb => Box::new(DuckDbDialect {}),
         EngineKind::Mssql => Box::new(MsSqlDialect {}),
         EngineKind::ClickHouse => Box::new(ClickHouseDialect {}),
-        // unreachable in practice
-        EngineKind::Redis | EngineKind::MongoDb => Box::new(GenericDialect {}),
+        // unreachable in practice (non-SQL engines never parse SQL)
+        EngineKind::Redis
+        | EngineKind::Valkey
+        | EngineKind::MongoDb
+        | EngineKind::Elasticsearch
+        | EngineKind::OpenSearch
+        | EngineKind::Qdrant => Box::new(GenericDialect {}),
     }
 }
 

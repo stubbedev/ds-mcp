@@ -252,7 +252,12 @@ impl SqlSource {
                     .build()?;
                 SqlPool::ClickHouse(ClickHouseHttp { client, url })
             }
-            EngineKind::Redis | EngineKind::MongoDb => {
+            EngineKind::Redis
+            | EngineKind::Valkey
+            | EngineKind::MongoDb
+            | EngineKind::Elasticsearch
+            | EngineKind::OpenSearch
+            | EngineKind::Qdrant => {
                 bail!("engine {} not handled by SqlSource", cfg.engine.name())
             }
         })
@@ -401,7 +406,12 @@ impl SqlSource {
                      WHERE table_type = 'BASE TABLE' ORDER BY 1, 2"
                 )
             }
-            EngineKind::Redis | EngineKind::MongoDb => unreachable!(),
+            EngineKind::Redis
+            | EngineKind::Valkey
+            | EngineKind::MongoDb
+            | EngineKind::Elasticsearch
+            | EngineKind::OpenSearch
+            | EngineKind::Qdrant => unreachable!(),
         }
     }
 
@@ -450,7 +460,12 @@ impl SqlSource {
                     quote_literal(table)
                 )
             }
-            EngineKind::Redis | EngineKind::MongoDb => unreachable!(),
+            EngineKind::Redis
+            | EngineKind::Valkey
+            | EngineKind::MongoDb
+            | EngineKind::Elasticsearch
+            | EngineKind::OpenSearch
+            | EngineKind::Qdrant => unreachable!(),
         }
     }
 }

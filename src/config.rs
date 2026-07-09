@@ -82,7 +82,11 @@ pub enum EngineKind {
     Mssql,
     ClickHouse,
     Redis,
+    Valkey,
     MongoDb,
+    Elasticsearch,
+    OpenSearch,
+    Qdrant,
 }
 
 impl EngineKind {
@@ -96,7 +100,11 @@ impl EngineKind {
             EngineKind::Mssql => "mssql",
             EngineKind::ClickHouse => "clickhouse",
             EngineKind::Redis => "redis",
+            EngineKind::Valkey => "valkey",
             EngineKind::MongoDb => "mongodb",
+            EngineKind::Elasticsearch => "elasticsearch",
+            EngineKind::OpenSearch => "opensearch",
+            EngineKind::Qdrant => "qdrant",
         }
     }
 }
@@ -121,6 +129,9 @@ pub struct SourceConfig {
     pub user: Option<String>,
     /// Password. Supports `${ENV_VAR}` expansion.
     pub password: Option<String>,
+    /// API key auth (elasticsearch/opensearch/qdrant). Supports `${ENV_VAR}`
+    /// expansion.
+    pub api_key: Option<String>,
     pub database: Option<String>,
     /// Database file path (sqlite/duckdb only). Supports `~` expansion.
     pub path: Option<String>,
@@ -257,6 +268,9 @@ fn expand(cfg: &mut Config, dotenv: &BTreeMap<String, String>) -> Result<()> {
         if let Some(v) = &src.dsn {
             src.dsn = Some(expand_env(v, dotenv).with_context(|| ctx("dsn"))?);
         }
+        if let Some(v) = &src.api_key {
+            src.api_key = Some(expand_env(v, dotenv).with_context(|| ctx("api_key"))?);
+        }
         if let Some(v) = &src.path {
             src.path = Some(expand_tilde(v));
         }
@@ -348,6 +362,13 @@ fn validate_source(src: &SourceConfig) -> Result<()> {
     }
     if src.engine != EngineKind::MongoDb && src.default_database.is_some() {
         bail!("`default_database` is mongodb-only; use `database`");
+    }
+    if !matches!(
+        src.engine,
+        EngineKind::Elasticsearch | EngineKind::OpenSearch | EngineKind::Qdrant
+    ) && src.api_key.is_some()
+    {
+        bail!("`api_key` is for elasticsearch/opensearch/qdrant only");
     }
     if src.ssh.is_some() && src.docker.is_some() {
         bail!("`ssh` and `docker` are mutually exclusive");

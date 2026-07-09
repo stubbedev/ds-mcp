@@ -4,6 +4,7 @@
 pub mod endpoint;
 pub mod mongo;
 pub mod redis;
+pub mod rest;
 pub mod sql;
 pub mod ssh;
 
@@ -15,6 +16,8 @@ pub enum Source {
     Sql(sql::SqlSource),
     Mongo(mongo::MongoSource),
     Redis(redis::RedisSource),
+    /// HTTP+JSON engines: elasticsearch, opensearch, qdrant.
+    Rest(rest::RestSource),
 }
 
 impl Source {
@@ -25,11 +28,16 @@ impl Source {
                 cfg,
                 force_readonly,
             ))),
-            EngineKind::Redis => Ok(Source::Redis(redis::RedisSource::new(
+            // Valkey is Redis-protocol compatible; OpenSearch is ES-API
+            // compatible — each rides the same source.
+            EngineKind::Redis | EngineKind::Valkey => Ok(Source::Redis(redis::RedisSource::new(
                 name,
                 cfg,
                 force_readonly,
             ))),
+            EngineKind::Elasticsearch | EngineKind::OpenSearch | EngineKind::Qdrant => Ok(
+                Source::Rest(rest::RestSource::new(name, cfg, force_readonly)),
+            ),
             _ => Ok(Source::Sql(sql::SqlSource::new(name, cfg, force_readonly))),
         }
     }
@@ -39,6 +47,7 @@ impl Source {
             Source::Sql(s) => (s.engine(), s.config(), s.readonly()),
             Source::Mongo(s) => (s.engine(), s.config(), s.readonly()),
             Source::Redis(s) => (s.engine(), s.config(), s.readonly()),
+            Source::Rest(s) => (s.engine(), s.config(), s.readonly()),
         };
         SourceInfo {
             name: name.to_string(),
@@ -54,6 +63,7 @@ impl Source {
             Source::Sql(s) => s.readonly(),
             Source::Mongo(s) => s.readonly(),
             Source::Redis(s) => s.readonly(),
+            Source::Rest(s) => s.readonly(),
         }
     }
 
@@ -62,6 +72,7 @@ impl Source {
             Source::Sql(s) => s.close().await,
             Source::Mongo(s) => s.close().await,
             Source::Redis(s) => s.close().await,
+            Source::Rest(s) => s.close().await,
         }
     }
 
@@ -100,16 +111,37 @@ impl Source {
             }),
             Source::Redis(r) => Ok(match table {
                 Some(key) => json!({
-                    "engine": "redis",
+                    "engine": r.engine().name(),
                     "key": key,
                     "type": r.command(&["TYPE".into(), key.into()]).await?,
                     "ttl": r.command(&["TTL".into(), key.into()]).await?,
                 }),
                 None => json!({
-                    "engine": "redis",
+                    "engine": r.engine().name(),
                     "keyspace": r.command(&["INFO".into(), "keyspace".into()]).await?,
                 }),
             }),
+            // ES/OpenSearch call these "index/indices"; Qdrant
+            // "collection/collections".
+            Source::Rest(r) => {
+                let (one, many) = if r.engine() == EngineKind::Qdrant {
+                    ("collection", "collections")
+                } else {
+                    ("index", "indices")
+                };
+                let mut obj = serde_json::Map::new();
+                obj.insert("engine".into(), r.engine().name().into());
+                match table {
+                    Some(name) => {
+                        obj.insert(one.into(), name.into());
+                        obj.insert("detail".into(), r.describe(name).await?);
+                    }
+                    None => {
+                        obj.insert(many.into(), r.list_containers().await?);
+                    }
+                }
+                Ok(serde_json::Value::Object(obj))
+            }
         }
     }
 }

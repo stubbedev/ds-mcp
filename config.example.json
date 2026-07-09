@@ -48,6 +48,27 @@
       "password": "${COMPOSE_DB_PASSWORD}",
       "database": "app",
       "docker": { "container": "myapp-postgres-1" }
+    },
+    "cache": {
+      "engine": "valkey",
+      "description": "Local Valkey cache; Redis-protocol compatible.",
+      "host": "127.0.0.1",
+      "port": 6379,
+      "readonly": true
+    },
+    "search": {
+      "engine": "elasticsearch",
+      "description": "Search cluster. Read-only introspection and _search queries.",
+      "uri": "https://es.example.com:9200",
+      "api_key": "${ES_API_KEY}",
+      "readonly": true
+    },
+    "vectors": {
+      "engine": "qdrant",
+      "description": "Qdrant vector store; read-only collection introspection and search.",
+      "uri": "http://127.0.0.1:6333",
+      "api_key": "${QDRANT_API_KEY}",
+      "readonly": true
     }
   }
 }
