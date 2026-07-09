@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
   "name": "io.github.stubbedev/ds-mcp",
-  "description": "Multi-engine data-source MCP server: MySQL/MariaDB, PostgreSQL, SQLite, DuckDB, SQL Server, ClickHouse, MongoDB and Redis behind one unified tool surface",
+  "description": "Multi-engine data-source MCP server: MySQL/MariaDB, PostgreSQL, SQLite, DuckDB, SQL Server, ClickHouse, MongoDB, Redis/Valkey, Elasticsearch/OpenSearch and Qdrant behind one unified tool surface",
   "repository": {
     "url": "https://github.com/stubbedev/ds-mcp",
     "source": "github"
   },
-  "version": "0.2.0",
+  "version": "0.3.1",
   "packages": [
     {
       "registryType": "github",
       "identifier": "stubbedev/ds-mcp",
-      "version": "0.2.0",
+      "version": "0.3.1",
       "transport": {
         "type": "stdio"
       },

@@ -120,8 +120,10 @@ _release bump:
         *) echo "unknown bump kind: {{bump}}"; exit 1 ;;
     esac
     sed -i "0,/^version = \".*\"/s//version = \"${NEW}\"/" Cargo.toml
+    # server.json mirrors the version in two places (top-level + package).
+    sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${NEW}\"/g" server.json
     cargo build -q   # refresh Cargo.lock
-    git add Cargo.toml Cargo.lock
+    git add Cargo.toml Cargo.lock server.json
     git commit -m "chore: bump to v${NEW}"
     git tag -a "v${NEW}" -m "v${NEW}"
     git push origin HEAD
