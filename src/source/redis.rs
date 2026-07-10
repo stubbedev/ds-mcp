@@ -15,7 +15,13 @@ pub struct RedisSource {
     tunnel: OnceCell<super::ssh::SshTunnel>,
 }
 
-/// Commands allowed on read-only sources. Uppercase.
+/// Commands allowed on read-only sources. Uppercase, no side effects. Only the
+/// non-writing variant of each family is here — e.g. `GEOSEARCH` not
+/// `GEOSEARCHSTORE`, `SINTER` not `SINTERSTORE`, the `*_RO` script/sort forms
+/// not `EVAL`/`SORT`. Container commands with mixed read/write subcommands
+/// (`CONFIG`, `MEMORY`) are NOT here — they are gated per-subcommand below.
+/// `PFCOUNT` is deliberately absent: Redis flags it a write (it may rewrite the
+/// HyperLogLog's cached cardinality and replicates), so it belongs on `execute`.
 const READ_COMMANDS: &[&str] = &[
     "GET",
     "MGET",
@@ -25,6 +31,8 @@ const READ_COMMANDS: &[&str] = &[
     "TYPE",
     "TTL",
     "PTTL",
+    "EXPIRETIME",
+    "PEXPIRETIME",
     "KEYS",
     "SCAN",
     "RANDOMKEY",
@@ -38,6 +46,7 @@ const READ_COMMANDS: &[&str] = &[
     "HSCAN",
     "HEXISTS",
     "HSTRLEN",
+    "HRANDFIELD",
     "LRANGE",
     "LLEN",
     "LINDEX",
@@ -51,45 +60,83 @@ const READ_COMMANDS: &[&str] = &[
     "SINTER",
     "SUNION",
     "SDIFF",
+    "SINTERCARD",
     "ZRANGE",
     "ZRANGEBYSCORE",
     "ZRANGEBYLEX",
     "ZREVRANGE",
+    "ZREVRANGEBYSCORE",
+    "ZREVRANGEBYLEX",
     "ZCARD",
     "ZCOUNT",
+    "ZLEXCOUNT",
     "ZSCORE",
     "ZMSCORE",
     "ZRANK",
     "ZREVRANK",
     "ZSCAN",
+    "ZRANDMEMBER",
+    "ZDIFF",
+    "ZINTER",
+    "ZUNION",
+    "ZINTERCARD",
     "XRANGE",
     "XREVRANGE",
     "XLEN",
     "XREAD",
     "XINFO",
+    "XPENDING",
     "BITCOUNT",
     "BITPOS",
     "GETBIT",
-    "PFCOUNT",
+    "BITFIELD_RO",
     "GEOPOS",
     "GEODIST",
+    "GEOHASH",
     "GEOSEARCH",
+    "GEORADIUS_RO",
+    "GEORADIUSBYMEMBER_RO",
+    "SORT_RO",
+    "EVAL_RO",
+    "EVALSHA_RO",
+    "FCALL_RO",
     "OBJECT",
-    "MEMORY",
     "INFO",
     "PING",
     "ECHO",
     "TIME",
     "COMMAND",
-    "CONFIG",
     "DUMP",
     "TOUCH",
     "LCS",
-    "SINTERCARD",
 ];
 
-pub fn is_read_command(cmd: &str) -> bool {
-    READ_COMMANDS.contains(&cmd.to_ascii_uppercase().as_str())
+/// Read-only subcommands of container commands whose siblings mutate. The gate
+/// is otherwise first-token-only, so these must be matched on the second token.
+const READ_SUBCOMMANDS: &[(&str, &[&str])] = &[
+    // CONFIG SET/REWRITE/RESETSTAT mutate the server; only GET/HELP read.
+    ("CONFIG", &["GET", "HELP"]),
+    // MEMORY PURGE has an allocator side effect; the rest are introspection.
+    (
+        "MEMORY",
+        &["USAGE", "STATS", "DOCTOR", "MALLOC-STATS", "HELP"],
+    ),
+];
+
+/// Is this command a read (safe on a read-only source)? First token must be in
+/// the allowlist; for container commands (`CONFIG`/`MEMORY`) the second token
+/// must be a read subcommand too, since the raw command runs verbatim.
+pub fn is_read_command(parts: &[String]) -> bool {
+    let Some(name) = parts.first() else {
+        return false;
+    };
+    let name = name.to_ascii_uppercase();
+    if let Some((_, subs)) = READ_SUBCOMMANDS.iter().find(|(c, _)| *c == name) {
+        return parts
+            .get(1)
+            .is_some_and(|s| subs.contains(&s.to_ascii_uppercase().as_str()));
+    }
+    READ_COMMANDS.contains(&name.as_str())
 }
 
 impl RedisSource {
@@ -244,12 +291,27 @@ fn bytes_to_json(bytes: Vec<u8>) -> Value {
 mod tests {
     use super::*;
 
+    fn cmd(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn read_allowlist() {
-        for cmd in ["GET", "get", "Scan", "HGETALL", "INFO"] {
-            assert!(is_read_command(cmd), "{cmd}");
+        for c in [
+            "GET",
+            "get",
+            "Scan",
+            "HGETALL",
+            "INFO",
+            "SORT_RO",
+            "EVAL_RO",
+            "GEOHASH",
+            "ZDIFF",
+            "EXPIRETIME",
+        ] {
+            assert!(is_read_command(&cmd(&[c])), "{c}");
         }
-        for cmd in [
+        for c in [
             "SET",
             "DEL",
             "FLUSHALL",
@@ -257,8 +319,34 @@ mod tests {
             "EXPIRE",
             "EVAL",
             "SUBSCRIBE",
+            "SORT",
+            "PFCOUNT",
+            "GETDEL",
+            "BITFIELD",
         ] {
-            assert!(!is_read_command(cmd), "{cmd}");
+            assert!(!is_read_command(&cmd(&[c])), "{c}");
         }
+    }
+
+    #[test]
+    fn container_subcommands_gated() {
+        // Reads pass, write subcommands are refused — the CONFIG SET bypass.
+        assert!(is_read_command(&cmd(&["CONFIG", "GET", "maxmemory"])));
+        assert!(is_read_command(&cmd(&["config", "get", "*"])));
+        assert!(is_read_command(&cmd(&["MEMORY", "USAGE", "k"])));
+        for parts in [
+            vec!["CONFIG", "SET", "requirepass", "x"],
+            vec!["CONFIG", "REWRITE"],
+            vec!["CONFIG", "RESETSTAT"],
+            vec!["CONFIG"], // no subcommand → not a read
+            vec!["MEMORY", "PURGE"],
+        ] {
+            assert!(!is_read_command(&cmd(&parts)), "{parts:?}");
+        }
+    }
+
+    #[test]
+    fn empty_is_not_read() {
+        assert!(!is_read_command(&[]));
     }
 }

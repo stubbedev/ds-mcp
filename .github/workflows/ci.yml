@@ -52,12 +52,26 @@ jobs:
       - run: nix flake check
 
       # Push the build closure to the attic cache so other machines
-      # (and future CI runs) can substitute instead of rebuilding.
+      # (and future CI runs) can substitute instead of rebuilding. Best effort:
+      # retry a few times in case the cache is briefly busy/restarting, and
+      # continue-on-error so a cache outage never fails CI — the build already
+      # succeeded.
       - name: Push to attic cache
         if: github.ref == 'refs/heads/master'
+        continue-on-error: true
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
         run: |
-          nix run nixpkgs#attic-client -- login ci https://nix.stubbe.dev "$ATTIC_TOKEN"
-          nix run nixpkgs#attic-client -- push ci:default \
-            "$(nix build .#default --print-out-paths --no-link)"
+          set -u
+          out="$(nix build .#default --print-out-paths --no-link)"
+          for attempt in 1 2 3 4 5; do
+            if nix run nixpkgs#attic-client -- login ci https://nix.stubbe.dev "$ATTIC_TOKEN" \
+              && nix run nixpkgs#attic-client -- push ci:default "$out"; then
+              echo "pushed to cache on attempt $attempt"
+              exit 0
+            fi
+            echo "attic push attempt $attempt failed; retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "attic cache push failed after 5 attempts (non-fatal)"
+          exit 1

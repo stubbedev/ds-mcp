@@ -4,7 +4,7 @@
 pkgname=ds-mcp-bin
 pkgver=0.2.0
 pkgrel=1
-pkgdesc="Multi-engine data-source MCP server (MySQL/MariaDB, Postgres, SQLite, DuckDB, MSSQL, ClickHouse, MongoDB, Redis)"
+pkgdesc="Multi-engine data-source MCP server (MySQL/MariaDB, Postgres, SQLite, DuckDB, MSSQL, ClickHouse, MongoDB, Redis/Valkey, Elasticsearch/OpenSearch, Qdrant)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/stubbedev/ds-mcp"
 license=('MIT')

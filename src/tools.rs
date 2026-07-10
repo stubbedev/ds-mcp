@@ -78,7 +78,10 @@ pub struct QueryArgs {
     /// - SQL engines: a single SELECT/SHOW/DESCRIBE/EXPLAIN string.
     /// - MongoDB: a command document, e.g. {"find": "widgets", "filter": {"qty": {"$gte": 1}}}
     ///   or {"aggregate": "widgets", "pipeline": [...]}. Extended JSON is honored.
-    /// - Redis: a command array, e.g. ["GET", "widget:1"].
+    /// - Redis/Valkey: a command array, e.g. ["GET", "widget:1"].
+    /// - Elasticsearch/OpenSearch/Qdrant: a REST request document, e.g.
+    ///   {"method": "GET", "path": "/widgets/_search", "body": {"query": {"match_all": {}}}}
+    ///   or {"method": "POST", "path": "/collections/widgets/points/search", "body": {...}}.
     pub query: Value,
     /// Database for MongoDB commands; defaults to the source's default_database.
     pub database: Option<String>,
@@ -93,7 +96,10 @@ pub struct ExecuteArgs {
     /// - SQL engines: any statement (INSERT/UPDATE/DELETE/CREATE/ALTER/...).
     /// - MongoDB: a command document, e.g. {"insert": "widgets", "documents": [...]},
     ///   {"update": ...}, {"delete": ...}, {"createIndexes": ...}, {"drop": ...}.
-    /// - Redis: a command array, e.g. ["SET", "widget:1", "sprocket"].
+    /// - Redis/Valkey: a command array, e.g. ["SET", "widget:1", "sprocket"].
+    /// - Elasticsearch/OpenSearch/Qdrant: a REST request document, e.g.
+    ///   {"method": "POST", "path": "/widgets/_doc", "body": {...}} or
+    ///   {"method": "PUT", "path": "/collections/widgets/points", "body": {...}}.
     pub query: Value,
     /// Database for MongoDB commands; defaults to the source's default_database.
     pub database: Option<String>,
@@ -237,6 +243,28 @@ fn as_redis_parts(v: Value) -> Result<Vec<String>, CallToolResult> {
         .collect()
 }
 
+/// A REST (elasticsearch/opensearch/qdrant) payload is a request document:
+/// {"method": "GET", "path": "/idx/_search", "body": {...}}. `method` defaults
+/// to GET, `body` is optional.
+fn as_rest_request(v: Value) -> Result<(String, String, Option<Value>), CallToolResult> {
+    let Value::Object(mut obj) = v else {
+        return Err(err(
+            "this source takes a request document, e.g. {\"method\": \"GET\", \"path\": \"/idx/_search\", \"body\": {\"query\": {\"match_all\": {}}}}",
+        ));
+    };
+    let method = match obj.remove("method") {
+        Some(Value::String(m)) => m,
+        None => "GET".to_string(),
+        Some(_) => return Err(err("`method` must be a string (GET/POST/PUT/DELETE/...)")),
+    };
+    let path = match obj.remove("path") {
+        Some(Value::String(p)) => p,
+        _ => return Err(err("`path` is required, e.g. \"/idx/_search\"")),
+    };
+    let body = obj.remove("body").filter(|b| !b.is_null());
+    Ok((method, path, body))
+}
+
 /// A Mongo payload must be a command document.
 fn as_mongo_command(v: Value) -> Result<bson::Document, CallToolResult> {
     crate::source::mongo::to_doc(v).map_err(|e| {
@@ -277,6 +305,7 @@ impl DsServer {
                 }
                 Source::Mongo(m) => m.ping().await?,
                 Source::Redis(r) => r.ping().await?,
+                Source::Rest(r) => r.ping().await?,
             }
             Ok(serde_json::json!({
                 "ok": true,
@@ -287,7 +316,7 @@ impl DsServer {
     }
 
     #[tool(
-        description = "Introspect a source. Without `table`: list tables/collections (SQL/mongo) or the keyspace (redis). With `table`: describe its columns (SQL), indexes (mongo), or a key's type and ttl (redis).",
+        description = "Introspect a source. Without `table`: list tables/collections (SQL/mongo), the keyspace (redis), ES/OpenSearch indices, or Qdrant collections. With `table`: describe its columns (SQL), indexes (mongo), a key's type and ttl (redis), ES field mappings, or a Qdrant collection's config.",
         annotations(read_only_hint = true)
     )]
     async fn schema(
@@ -304,7 +333,7 @@ impl DsServer {
     }
 
     #[tool(
-        description = "Run a read against a source. `query` is engine-native: a SQL SELECT/SHOW/DESCRIBE/EXPLAIN string; a MongoDB command document like {\"find\": \"c\", \"filter\": {...}} or {\"aggregate\": \"c\", \"pipeline\": [...]}; or a Redis command array like [\"GET\", \"k\"]. Writes are refused here (use execute). Results are capped at `limit` rows/documents with a truncated/has_more flag; paginate with LIMIT/OFFSET (SQL) or skip/limit (mongo).",
+        description = "Run a read against a source. `query` is engine-native: a SQL SELECT/SHOW/DESCRIBE/EXPLAIN string; a MongoDB command document like {\"find\": \"c\", \"filter\": {...}} or {\"aggregate\": \"c\", \"pipeline\": [...]}; a Redis/Valkey command array like [\"GET\", \"k\"]; or an Elasticsearch/OpenSearch/Qdrant REST request document like {\"method\": \"GET\", \"path\": \"/idx/_search\", \"body\": {...}}. Writes are refused here (use execute). Results are capped at `limit` rows/documents with a truncated/has_more flag; paginate with LIMIT/OFFSET (SQL) or skip/limit (mongo).",
         annotations(read_only_hint = true)
     )]
     async fn query(
@@ -353,7 +382,7 @@ impl DsServer {
                 let Some(first) = parts.first() else {
                     return err("command is empty");
                 };
-                if !crate::source::redis::is_read_command(first) {
+                if !crate::source::redis::is_read_command(&parts) {
                     return err(format!("{first} is not a read command; use execute"));
                 }
                 self.run(timeout, async move {
@@ -361,11 +390,21 @@ impl DsServer {
                 })
                 .await
             }
+            Source::Rest(r) => {
+                let (method, path, body) = match as_rest_request(args.query) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+                if !crate::source::rest::is_read_request(r.engine(), &method, &path) {
+                    return err(format!("{method} {path} is not a read; use execute"));
+                }
+                self.run(timeout, r.request(&method, &path, body)).await
+            }
         }
     }
 
     #[tool(
-        description = "Run a write against a writable source. `query` is engine-native: any SQL statement (INSERT/UPDATE/DELETE/CREATE/ALTER/CREATE INDEX/...); a MongoDB command document like {\"insert\": ...}, {\"update\": ...}, {\"delete\": ...}, {\"createIndexes\": ...}, {\"drop\": ...}; or a Redis command array like [\"SET\", \"k\", \"v\"]. Refused on read-only sources. No implicit guards — a DELETE without a filter deletes everything.",
+        description = "Run a write against a writable source. `query` is engine-native: any SQL statement (INSERT/UPDATE/DELETE/CREATE/ALTER/CREATE INDEX/...); a MongoDB command document like {\"insert\": ...}, {\"update\": ...}, {\"delete\": ...}, {\"createIndexes\": ...}, {\"drop\": ...}; a Redis/Valkey command array like [\"SET\", \"k\", \"v\"]; or an Elasticsearch/OpenSearch/Qdrant REST request document like {\"method\": \"POST\", \"path\": \"/idx/_doc\", \"body\": {...}}. Refused on read-only sources. No implicit guards — a DELETE without a filter deletes everything.",
         annotations(destructive_hint = true)
     )]
     async fn execute(
@@ -405,6 +444,13 @@ impl DsServer {
                     Ok(serde_json::json!({"result": r.command(&parts).await?}))
                 })
                 .await
+            }
+            Source::Rest(r) => {
+                let (method, path, body) = match as_rest_request(args.query) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+                self.run(timeout, r.request(&method, &path, body)).await
             }
         }
     }

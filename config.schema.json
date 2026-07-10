@@ -122,6 +122,13 @@
             "null"
           ]
         },
+        "api_key": {
+          "description": "API key auth (elasticsearch/opensearch/qdrant). Supports `${ENV_VAR}`\nexpansion.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "database": {
           "type": [
             "string",
@@ -190,7 +197,11 @@
         "mssql",
         "clickhouse",
         "redis",
-        "mongodb"
+        "valkey",
+        "mongodb",
+        "elasticsearch",
+        "opensearch",
+        "qdrant"
       ]
     },
     "SshConfig": {

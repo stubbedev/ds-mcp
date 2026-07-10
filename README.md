@@ -1,9 +1,9 @@
 # DataStore MCP
 
 One MCP server for many databases. `ds-mcp` exposes named data sources —
-MySQL/MariaDB, PostgreSQL, SQLite, DuckDB, SQL Server, ClickHouse, MongoDB
-and Redis — to MCP clients over stdio or streamable HTTP, behind a single
-unified tool surface.
+MySQL/MariaDB, PostgreSQL, SQLite, DuckDB, SQL Server, ClickHouse, MongoDB,
+Redis/Valkey, Elasticsearch/OpenSearch and Qdrant — to MCP clients over stdio
+or streamable HTTP, behind a single unified tool surface.
 
 ## Install
 
@@ -39,10 +39,11 @@ generated [config.schema.json](config.schema.json).
 ```
 
 Per source: `engine` (`mysql` | `mariadb` | `postgres` | `sqlite` | `duckdb` |
-`mssql` | `clickhouse` | `redis` | `mongodb`), discrete `host`/`port`/`user`/`password`/`database` fields or a
-full `dsn` (alias `uri`), `readonly`, a `description` the model uses to pick
-the right source, `path` for sqlite/duckdb files, and `default_database` for
-mongo. Everything defaults sanely: a bare `{"engine": "postgres"}` connects
+`mssql` | `clickhouse` | `redis` | `valkey` | `mongodb` | `elasticsearch` |
+`opensearch` | `qdrant`), discrete `host`/`port`/`user`/`password`/`database`
+fields or a full `dsn` (alias `uri`), `readonly`, a `description` the model
+uses to pick the right source, `path` for sqlite/duckdb files,
+`default_database` for mongo, and `api_key` for elasticsearch/opensearch/qdrant. Everything defaults sanely: a bare `{"engine": "postgres"}` connects
 to localhost on the default port. In per-repo `.ds-mcp.json` files, relative
 paths (`path`, ssh key files) resolve against the config file's directory.
 
@@ -116,16 +117,34 @@ dispatches internally:
 |---|---|---|
 | SQL (mysql/mariadb/postgres/sqlite/duckdb/mssql/clickhouse) | a statement string | `"SELECT * FROM t WHERE id = 1"` |
 | MongoDB | a runCommand document (Extended JSON) | `{"find": "t", "filter": {"id": 1}}` |
-| Redis | a command array | `["GET", "k"]` |
+| Redis/Valkey | a command array | `["GET", "k"]` |
+| Elasticsearch/OpenSearch/Qdrant | a REST request document (`method` defaults to GET) | `{"method": "GET", "path": "/t/_search", "body": {"query": {"match_all": {}}}}` |
 
 Read/write is enforced per engine: SQL through a real parser (only
 SELECT/SHOW/DESCRIBE/EXPLAIN pass `query`); MongoDB by command name (find /
 aggregate / count / ... are reads; insert / update / delete / createIndexes /
 drop / ... are writes, and aggregate with `$out`/`$merge` counts as a write);
-Redis by a read-command allowlist. Anything that writes is rejected from
+Redis/Valkey by a read-command allowlist; Elasticsearch/OpenSearch/Qdrant by
+HTTP method + path (GET/HEAD and read POSTs — ES `_search`/`_count`/..., Qdrant
+`points/search`/`scroll`/`count`/`query` — are reads; PUT / DELETE and mutating
+POSTs like `_bulk`/`_doc` or `points/delete`/`points` upserts are writes).
+Anything that writes is rejected from
 `query` and pointed at `execute`. `execute` runs the payload verbatim on
 writable sources — no implicit guards, so a `DELETE` without a filter deletes
 everything, exactly as that engine's shell would.
+
+A `readonly` source (or `--read-only`) refuses `execute` outright, and its
+`query` classifier is allowlist / default-deny — an unknown or unparseable
+payload is treated as a write, and the classifier inspects the exact
+statement/command/normalized-path the engine will run (so tricks like a
+data-modifying CTE, `EXPLAIN ANALYZE <write>`, a `$merge` nested in a
+sub-pipeline, `CONFIG SET`, or a `../` path segment cannot slip a write onto
+the read path). For defense in depth the readonly flag is also pushed down to
+the connection where the engine supports it — sqlite/duckdb open the file
+read-only, postgres sets `default_transaction_read_only`, clickhouse sets
+`readonly=2` — so even a side-effecting function the parser can't see is
+refused. mysql/mariadb/mssql have no equivalent per-session switch here; for a
+hard guarantee on those, point the source at a read-only database user.
 
 Reads are capped at `limit` rows/documents (default 1000) with a
 `truncated`/`has_more` flag; paginate with LIMIT/OFFSET (SQL) or skip/limit

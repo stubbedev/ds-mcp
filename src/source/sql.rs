@@ -157,6 +157,12 @@ impl SqlSource {
                 };
                 let (host, port) = resolve(o.get_host(), o.get_port()).await?;
                 o = o.host(&host).port(port);
+                // Defense in depth: a readonly source forces every transaction
+                // read-only at the server, so even a write the SQL guard can't
+                // see (a side-effecting function like nextval()) is refused.
+                if self.readonly {
+                    o = o.options([("default_transaction_read_only", "on")]);
+                }
                 SqlPool::Pg(opts(cfg).connect_lazy_with(o))
             }
             EngineKind::Sqlite => {
@@ -247,12 +253,22 @@ impl SqlSource {
                 } else if !url.ends_with('?') && !url.ends_with('&') {
                     url.push('&');
                 }
+                // Defense in depth: readonly=2 lets the server reject writes
+                // and DDL while still allowing SETTINGS on read queries.
+                if self.readonly {
+                    url.push_str("readonly=2&");
+                }
                 let client = reqwest::Client::builder()
                     .connect_timeout(cfg.connect_timeout())
                     .build()?;
                 SqlPool::ClickHouse(ClickHouseHttp { client, url })
             }
-            EngineKind::Redis | EngineKind::MongoDb => {
+            EngineKind::Redis
+            | EngineKind::Valkey
+            | EngineKind::MongoDb
+            | EngineKind::Elasticsearch
+            | EngineKind::OpenSearch
+            | EngineKind::Qdrant => {
                 bail!("engine {} not handled by SqlSource", cfg.engine.name())
             }
         })
@@ -401,7 +417,12 @@ impl SqlSource {
                      WHERE table_type = 'BASE TABLE' ORDER BY 1, 2"
                 )
             }
-            EngineKind::Redis | EngineKind::MongoDb => unreachable!(),
+            EngineKind::Redis
+            | EngineKind::Valkey
+            | EngineKind::MongoDb
+            | EngineKind::Elasticsearch
+            | EngineKind::OpenSearch
+            | EngineKind::Qdrant => unreachable!(),
         }
     }
 
@@ -450,7 +471,12 @@ impl SqlSource {
                     quote_literal(table)
                 )
             }
-            EngineKind::Redis | EngineKind::MongoDb => unreachable!(),
+            EngineKind::Redis
+            | EngineKind::Valkey
+            | EngineKind::MongoDb
+            | EngineKind::Elasticsearch
+            | EngineKind::OpenSearch
+            | EngineKind::Qdrant => unreachable!(),
         }
     }
 }
