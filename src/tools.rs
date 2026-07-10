@@ -216,6 +216,17 @@ macro_rules! src {
     };
 }
 
+/// MCP clients routinely serialize the structured `query` argument as a JSON
+/// string (the schema leaves it untyped). Unwrap one level so the mongo /
+/// redis / REST converters see the real value; non-JSON strings pass through
+/// untouched so their original type errors still apply.
+fn coerce_structured(v: Value) -> Value {
+    match v {
+        Value::String(ref s) => serde_json::from_str(s.trim()).unwrap_or(v),
+        other => other,
+    }
+}
+
 /// A SQL payload must be a string.
 fn as_sql_string(v: &Value, engine: &str) -> Result<String, CallToolResult> {
     v.as_str().map(str::to_owned).ok_or_else(|| {
@@ -227,7 +238,7 @@ fn as_sql_string(v: &Value, engine: &str) -> Result<String, CallToolResult> {
 
 /// A Redis payload must be an array of string/number/bool args.
 fn as_redis_parts(v: Value) -> Result<Vec<String>, CallToolResult> {
-    let Value::Array(items) = v else {
+    let Value::Array(items) = coerce_structured(v) else {
         return Err(err(
             "redis sources take a command array, e.g. [\"GET\", \"key\"]",
         ));
@@ -247,7 +258,7 @@ fn as_redis_parts(v: Value) -> Result<Vec<String>, CallToolResult> {
 /// {"method": "GET", "path": "/idx/_search", "body": {...}}. `method` defaults
 /// to GET, `body` is optional.
 fn as_rest_request(v: Value) -> Result<(String, String, Option<Value>), CallToolResult> {
-    let Value::Object(mut obj) = v else {
+    let Value::Object(mut obj) = coerce_structured(v) else {
         return Err(err(
             "this source takes a request document, e.g. {\"method\": \"GET\", \"path\": \"/idx/_search\", \"body\": {\"query\": {\"match_all\": {}}}}",
         ));
@@ -267,7 +278,7 @@ fn as_rest_request(v: Value) -> Result<(String, String, Option<Value>), CallTool
 
 /// A Mongo payload must be a command document.
 fn as_mongo_command(v: Value) -> Result<bson::Document, CallToolResult> {
-    crate::source::mongo::to_doc(v).map_err(|e| {
+    crate::source::mongo::to_doc(coerce_structured(v)).map_err(|e| {
         err(format!(
             "mongodb sources take a command document, e.g. {{\"find\": \"coll\", \"filter\": {{}}}} ({e:#})"
         ))
@@ -540,5 +551,29 @@ impl ServerHandler for DsServer {
              is engine-native: a SQL string, a MongoDB command document, or a Redis \
              command array.",
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_payloads_accept_stringified_json() {
+        let doc = as_mongo_command(Value::String(r#"{"find": "coll", "filter": {}}"#.into()))
+            .expect("stringified mongo command document");
+        assert_eq!(doc.get_str("find").unwrap(), "coll");
+
+        let parts = as_redis_parts(Value::String(r#"["GET", "key"]"#.into()))
+            .expect("stringified redis command array");
+        assert_eq!(parts, vec!["GET".to_string(), "key".to_string()]);
+
+        let (method, path, _) =
+            as_rest_request(Value::String(r#"{"path": "/idx/_search"}"#.into()))
+                .expect("stringified rest request document");
+        assert_eq!(method, "GET");
+        assert_eq!(path, "/idx/_search");
+
+        assert!(as_mongo_command(Value::String("not json".into())).is_err());
     }
 }
