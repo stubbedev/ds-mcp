@@ -53,7 +53,6 @@ jobs:
 
       # Push the build closure to the xilo cache so other machines
       # (and future CI runs) can substitute instead of rebuilding. Best effort:
-      # retry a few times in case the cache is briefly busy/restarting, and
       # continue-on-error so a cache outage never fails CI — the build already
       # succeeded.
       - name: setup xilo
@@ -70,13 +69,4 @@ jobs:
         run: |
           set -u
           out="$(nix build .#default --print-out-paths --no-link)"
-          for attempt in 1 2 3 4 5; do
-            if xilo push default "$out"; then
-              echo "pushed to cache on attempt $attempt"
-              exit 0
-            fi
-            echo "xilo push attempt $attempt failed; retrying in $((attempt * 15))s"
-            sleep $((attempt * 15))
-          done
-          echo "xilo cache push failed after 5 attempts (non-fatal)"
-          exit 1
+          xilo push default "$out"
