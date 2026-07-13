@@ -113,12 +113,12 @@ impl Source {
                 Some(key) => json!({
                     "engine": r.engine().name(),
                     "key": key,
-                    "type": r.command(&["TYPE".into(), key.into()]).await?,
-                    "ttl": r.command(&["TTL".into(), key.into()]).await?,
+                    "type": r.command(&["TYPE".into(), key.into()], database).await?,
+                    "ttl": r.command(&["TTL".into(), key.into()], database).await?,
                 }),
                 None => json!({
                     "engine": r.engine().name(),
-                    "keyspace": r.command(&["INFO".into(), "keyspace".into()]).await?,
+                    "keyspace": r.command(&["INFO".into(), "keyspace".into()], database).await?,
                 }),
             }),
             // ES/OpenSearch call these "index/indices"; Qdrant

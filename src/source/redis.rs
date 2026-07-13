@@ -1,18 +1,26 @@
 //! Redis sources: one tool surface (`redis_command`) running raw commands.
 //! Read-only sources are gated by a read-command allowlist.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex;
 
 use crate::config::{EngineKind, SourceConfig};
+
+/// A cached connection plus the tunnel (if any) that keeps it reachable.
+type Conn = (
+    redis::aio::MultiplexedConnection,
+    Option<super::ssh::SshTunnel>,
+);
 
 pub struct RedisSource {
     name: String,
     cfg: SourceConfig,
     readonly: bool,
-    conn: OnceCell<redis::aio::MultiplexedConnection>,
-    tunnel: OnceCell<super::ssh::SshTunnel>,
+    /// One connection per database index, opened on first use and reused.
+    conns: Mutex<HashMap<String, Conn>>,
 }
 
 /// Commands allowed on read-only sources. Uppercase, no side effects. Only the
@@ -146,8 +154,7 @@ impl RedisSource {
             name: name.to_string(),
             cfg,
             readonly,
-            conn: OnceCell::new(),
-            tunnel: OnceCell::new(),
+            conns: Mutex::new(HashMap::new()),
         }
     }
 
@@ -165,64 +172,81 @@ impl RedisSource {
 
     pub async fn close(&self) {}
 
-    async fn conn(&self) -> Result<redis::aio::MultiplexedConnection> {
-        let conn = self
-            .conn
-            .get_or_try_init(|| async {
-                let set_tunnel = |t| {
-                    let _ = self.tunnel.set(t);
-                };
-                let url = match &self.cfg.dsn {
-                    Some(dsn) => {
-                        let mut parsed = url::Url::parse(dsn).context("parse redis dsn")?;
-                        let host = parsed.host_str().unwrap_or("127.0.0.1").to_string();
-                        let port = parsed.port().unwrap_or(6379);
-                        let ep = super::endpoint::resolve(&self.cfg, &host, port).await?;
-                        let _ = parsed.set_host(Some(&ep.host));
-                        let _ = parsed.set_port(Some(ep.port));
-                        if let Some(t) = ep.tunnel {
-                            set_tunnel(t);
-                        }
-                        parsed.to_string()
-                    }
-                    None => {
-                        let target = self.cfg.host.as_deref().unwrap_or("127.0.0.1");
-                        let ep = super::endpoint::resolve(
-                            &self.cfg,
-                            target,
-                            self.cfg.port.unwrap_or(6379),
-                        )
-                        .await?;
-                        if let Some(t) = ep.tunnel {
-                            set_tunnel(t);
-                        }
-                        let auth = self
-                            .cfg
-                            .password
-                            .as_ref()
-                            .map(|p| format!(":{p}@"))
-                            .unwrap_or_default();
-                        let db = self.cfg.database.as_deref().unwrap_or("0");
-                        format!("redis://{auth}{}:{}/{db}", ep.host, ep.port)
-                    }
-                };
-                let client = redis::Client::open(url.as_str())?;
-                Ok::<_, anyhow::Error>(
-                    tokio::time::timeout(
-                        self.cfg.connect_timeout(),
-                        client.get_multiplexed_async_connection(),
-                    )
-                    .await
-                    .map_err(|_| anyhow::anyhow!("connect timed out"))??,
-                )
-            })
-            .await
-            .with_context(|| format!("connect to source {:?}", self.name))?;
-        Ok(conn.clone())
+    /// The source's configured database (the `/N` in the URL). Defaults to `0`.
+    fn configured_db(&self) -> &str {
+        self.cfg.database.as_deref().unwrap_or("0")
     }
 
-    /// Run a raw command. The caller enforces the read-only gate.
-    pub async fn command(&self, parts: &[String]) -> Result<Value> {
+    /// Build the redis URL for `db`, resolving the endpoint (and opening a
+    /// tunnel if configured). Returns the URL and the tunnel to keep alive.
+    async fn build_url(&self, db: &str) -> Result<(String, Option<super::ssh::SshTunnel>)> {
+        match &self.cfg.dsn {
+            Some(dsn) => {
+                let mut parsed = url::Url::parse(dsn).context("parse redis dsn")?;
+                let host = parsed.host_str().unwrap_or("127.0.0.1").to_string();
+                let port = parsed.port().unwrap_or(6379);
+                let ep = super::endpoint::resolve(&self.cfg, &host, port).await?;
+                let _ = parsed.set_host(Some(&ep.host));
+                let _ = parsed.set_port(Some(ep.port));
+                parsed.set_path(&format!("/{db}"));
+                Ok((parsed.to_string(), ep.tunnel))
+            }
+            None => {
+                let target = self.cfg.host.as_deref().unwrap_or("127.0.0.1");
+                let ep = super::endpoint::resolve(&self.cfg, target, self.cfg.port.unwrap_or(6379))
+                    .await?;
+                let auth = self
+                    .cfg
+                    .password
+                    .as_ref()
+                    .map(|p| format!(":{p}@"))
+                    .unwrap_or_default();
+                Ok((
+                    format!("redis://{auth}{}:{}/{db}", ep.host, ep.port),
+                    ep.tunnel,
+                ))
+            }
+        }
+    }
+
+    async fn open(
+        &self,
+        db: &str,
+    ) -> Result<(
+        redis::aio::MultiplexedConnection,
+        Option<super::ssh::SshTunnel>,
+    )> {
+        let (url, tunnel) = self.build_url(db).await?;
+        let client = redis::Client::open(url.as_str())?;
+        let conn = tokio::time::timeout(
+            self.cfg.connect_timeout(),
+            client.get_multiplexed_async_connection(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("connect timed out"))??;
+        Ok((conn, tunnel))
+    }
+
+    /// A connection to `db`, opened on first use and cached for reuse. SELECT is
+    /// a write (blocked, and unsafe on a multiplexed connection), so each db
+    /// index gets its own connection instead.
+    async fn conn(&self, db: &str) -> Result<redis::aio::MultiplexedConnection> {
+        if let Some((conn, _)) = self.conns.lock().await.get(db) {
+            return Ok(conn.clone());
+        }
+        // Open outside the lock; a concurrent opener for the same db just loses
+        // its connection (dropped here), which is fine.
+        let entry = self
+            .open(db)
+            .await
+            .with_context(|| format!("connect to source {:?} db {db}", self.name))?;
+        let mut map = self.conns.lock().await;
+        Ok(map.entry(db.to_string()).or_insert(entry).0.clone())
+    }
+
+    /// Run a raw command. The caller enforces the read-only gate. `db` overrides
+    /// the source's configured database for this call; defaults to it.
+    pub async fn command(&self, parts: &[String], db: Option<&str>) -> Result<Value> {
         let Some((name, args)) = parts.split_first() else {
             bail!("empty command");
         };
@@ -230,13 +254,12 @@ impl RedisSource {
         for arg in args {
             cmd.arg(arg.as_str());
         }
-        let mut conn = self.conn().await?;
-        let value: redis::Value = cmd.query_async(&mut conn).await?;
-        Ok(redis_to_json(value))
+        let mut conn = self.conn(db.unwrap_or(self.configured_db())).await?;
+        Ok(redis_to_json(cmd.query_async(&mut conn).await?))
     }
 
     pub async fn ping(&self) -> Result<()> {
-        self.command(&["PING".into()]).await.map(|_| ())
+        self.command(&["PING".into()], None).await.map(|_| ())
     }
 }
 

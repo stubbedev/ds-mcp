@@ -83,7 +83,9 @@ pub struct QueryArgs {
     ///   {"method": "GET", "path": "/widgets/_search", "body": {"query": {"match_all": {}}}}
     ///   or {"method": "POST", "path": "/collections/widgets/points/search", "body": {...}}.
     pub query: Value,
-    /// Database for MongoDB commands; defaults to the source's default_database.
+    /// Database override: for MongoDB the database name (defaults to the
+    /// source's default_database); for Redis/Valkey the numeric db index
+    /// (defaults to the source's configured db, else 0).
     pub database: Option<String>,
     /// Max rows/documents to return (SQL + Mongo find/aggregate). Default 1000.
     pub limit: Option<usize>,
@@ -101,7 +103,9 @@ pub struct ExecuteArgs {
     ///   {"method": "POST", "path": "/widgets/_doc", "body": {...}} or
     ///   {"method": "PUT", "path": "/collections/widgets/points", "body": {...}}.
     pub query: Value,
-    /// Database for MongoDB commands; defaults to the source's default_database.
+    /// Database override: for MongoDB the database name (defaults to the
+    /// source's default_database); for Redis/Valkey the numeric db index
+    /// (defaults to the source's configured db, else 0).
     pub database: Option<String>,
 }
 
@@ -396,8 +400,9 @@ impl DsServer {
                 if !crate::source::redis::is_read_command(&parts) {
                     return err(format!("{first} is not a read command; use execute"));
                 }
+                let db = args.database;
                 self.run(timeout, async move {
-                    Ok(serde_json::json!({"result": r.command(&parts).await?}))
+                    Ok(serde_json::json!({"result": r.command(&parts, db.as_deref()).await?}))
                 })
                 .await
             }
@@ -451,8 +456,9 @@ impl DsServer {
                 if parts.is_empty() {
                     return err("command is empty");
                 }
+                let db = args.database;
                 self.run(timeout, async move {
-                    Ok(serde_json::json!({"result": r.command(&parts).await?}))
+                    Ok(serde_json::json!({"result": r.command(&parts, db.as_deref()).await?}))
                 })
                 .await
             }
