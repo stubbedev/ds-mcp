@@ -6,12 +6,12 @@
     "url": "https://github.com/stubbedev/ds-mcp",
     "source": "github"
   },
-  "version": "0.3.4",
+  "version": "0.3.5",
   "packages": [
     {
       "registryType": "github",
       "identifier": "stubbedev/ds-mcp",
-      "version": "0.3.4",
+      "version": "0.3.5",
       "transport": {
         "type": "stdio"
       },
