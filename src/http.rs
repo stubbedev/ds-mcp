@@ -19,7 +19,10 @@ pub async fn serve(
     let ct = CancellationToken::new();
 
     let mut config = StreamableHttpServerConfig::default()
-        .with_stateful_mode(!cfg.stateless)
+        // rmcp 3 renamed this: sessions only exist below protocol 2026-07-28,
+        // and SEP-2567 removes them from that version on, so a client speaking
+        // the new protocol is served statelessly whatever this says.
+        .with_legacy_session_mode(!cfg.stateless)
         .with_json_response(cfg.json_response)
         .with_cancellation_token(ct.child_token());
     // Default: rmcp only accepts localhost Host headers (DNS-rebind guard).

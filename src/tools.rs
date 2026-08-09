@@ -14,8 +14,8 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, ContentBlock, ErrorData, ListResourcesResult, PaginatedRequestParams,
-    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
-    ServerInfo,
+    ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+    ResourceContents, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{RoleServer, ServerHandler, tool, tool_handler, tool_router};
@@ -147,11 +147,15 @@ impl DsServer {
             }
         }
 
-        let supports_roots = ctx
-            .peer
-            .peer_info()
-            .is_some_and(|info| info.capabilities.roots.is_some());
-        if supports_roots {
+        // Ask the client for its roots only if it advertised them AND it
+        // negotiated a version where a server may still ask: MCP 2026-07-28
+        // (SEP-2322/2575) forbids server-initiated requests, so from there on
+        // the call is refused and the headers above are the only signal.
+        let can_ask_roots = ctx.peer.peer_info().is_some_and(|info| {
+            info.capabilities.roots.is_some()
+                && info.protocol_version.as_str() < ProtocolVersion::V_2026_07_28.as_str()
+        });
+        if can_ask_roots {
             let mut cache = self.roots_cache.lock().await;
             if cache.is_none() {
                 #[allow(deprecated)] // roots is deprecated in the MCP spec but still widely used
@@ -207,8 +211,17 @@ impl DsServer {
     }
 }
 
-/// Header names a trusted proxy can use to inject workspace roots.
-const ROOTS_HEADERS: [&str; 4] = ["x-mcp-roots", "x-mcp-root", "mcp-roots", "mcp-root"];
+/// Header names a trusted proxy can use to inject workspace roots. `x-repo-root`
+/// leads: it is the name the rest of this fleet reads, and headers are the only
+/// workspace signal that survives MCP 2026-07-28, which forbids the
+/// server-initiated `roots/list` used as the fallback below.
+const ROOTS_HEADERS: [&str; 5] = [
+    "x-repo-root",
+    "x-mcp-roots",
+    "x-mcp-root",
+    "mcp-roots",
+    "mcp-root",
+];
 
 /// Resolve `$args.source` (plus the query timeout) or return the error result.
 macro_rules! src {
@@ -510,7 +523,7 @@ impl ServerHandler for DsServer {
         &self,
         request: ReadResourceRequestParams,
         ctx: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, ErrorData> {
+    ) -> Result<ReadResourceResponse, ErrorData> {
         let name = request
             .uri
             .strip_prefix("ds://")
@@ -537,10 +550,9 @@ impl ServerHandler for DsServer {
             .map_err(|_| ErrorData::internal_error("schema read timed out", None))?
             .map_err(|e| ErrorData::internal_error(format!("{e:#}"), None))?;
         let text = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string());
-        Ok(ReadResourceResult::new(vec![ResourceContents::text(
-            text,
-            request.uri,
-        )]))
+        // rmcp 3 lets a handler answer with either the finished result or an
+        // MRTR input request (SEP-2322); this one never needs client input.
+        Ok(ReadResourceResult::new(vec![ResourceContents::text(text, request.uri)]).into())
     }
 
     fn get_info(&self) -> ServerInfo {
