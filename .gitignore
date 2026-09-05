@@ -1,2 +1,5 @@
 /target
 /bin
+# `nix build` output symlinks.
+/result
+/result-*

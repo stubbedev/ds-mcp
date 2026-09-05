@@ -101,8 +101,11 @@
             commonArgs
             // {
               inherit cargoArtifacts version;
-              # The ssh tunnel test needs docker; everything else runs.
-              cargoTestExtraArgs = "-- --skip=ssh_tunnel";
+              # The `rust` CI job runs the whole suite on this commit in under
+              # two minutes. Running it again here costs a second full compile
+              # of ds-mcp against the test harness (~3.5 min in CI) to learn
+              # the same thing, so this build only produces the binary.
+              doCheck = false;
               meta = {
                 description = "Multi-engine data-source MCP server";
                 license = pkgs.lib.licenses.mit;
