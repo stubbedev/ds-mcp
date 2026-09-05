@@ -80,7 +80,7 @@ pub fn command_is_read(cmd: &Document) -> Result<bool> {
 /// with `$` — so scanning for those keys anywhere is safe and catches them
 /// inside `$facet`, `$unionWith`/`$lookup` sub-pipelines, etc. Genuine MongoDB
 /// rejects a writing stage in those positions, but Mongo-compatible backends
-/// (FerretDB, CosmosDB, DocumentDB) may not — so we do not rely on the server.
+/// (`FerretDB`, `CosmosDB`, `DocumentDB`) may not — so we do not rely on the server.
 fn stage_writes(stage: &Bson) -> bool {
     match stage {
         Bson::Document(d) => {
@@ -103,11 +103,11 @@ impl MongoSource {
         }
     }
 
-    pub fn config(&self) -> &SourceConfig {
+    pub const fn config(&self) -> &SourceConfig {
         &self.cfg
     }
 
-    pub fn readonly(&self) -> bool {
+    pub const fn readonly(&self) -> bool {
         self.readonly
     }
 
@@ -185,7 +185,7 @@ impl MongoSource {
 
     /// Run a command document. When `cap` is Some and the command is
     /// find/aggregate, a limit is injected and the cursor is normalized to
-    /// {documents, count, has_more}; every other command returns its raw
+    /// {documents, count, `has_more`}; every other command returns its raw
     /// result document.
     pub async fn run_command(
         &self,
@@ -201,17 +201,17 @@ impl MongoSource {
             .unwrap_or_default();
         match (cap, name.as_str()) {
             (Some(limit), "find") => {
-                cmd.insert("limit", (limit + 1) as i64);
-                Ok(cursor_docs(db.run_command(cmd).await?, limit))
+                cmd.insert("limit", fetch_limit(limit));
+                Ok(cursor_docs(&db.run_command(cmd).await?, limit))
             }
             (Some(limit), "aggregate") => {
                 if !cmd.contains_key("cursor") {
                     cmd.insert("cursor", Document::new());
                 }
                 if let Ok(pipeline) = cmd.get_array_mut("pipeline") {
-                    pipeline.push(Bson::Document(bson::doc! {"$limit": (limit + 1) as i64}));
+                    pipeline.push(Bson::Document(bson::doc! {"$limit": fetch_limit(limit)}));
                 }
-                Ok(cursor_docs(db.run_command(cmd).await?, limit))
+                Ok(cursor_docs(&db.run_command(cmd).await?, limit))
             }
             _ => Ok(doc_to_json(db.run_command(cmd).await?)),
         }
@@ -246,18 +246,21 @@ impl MongoSource {
             .await?;
         Ok(indexes
             .into_iter()
-            .map(|m| {
-                bson::to_bson(&m)
-                    .map(Bson::into_relaxed_extjson)
-                    .unwrap_or(Value::Null)
-            })
+            .map(|m| bson::to_bson(&m).map_or(Value::Null, Bson::into_relaxed_extjson))
             .collect())
     }
 }
 
+/// One more than the requested cap, as the i64 the wire protocol wants — that
+/// extra document is what tells us more exist. A cap too large for an i64 is a
+/// caller asking for more than the protocol can express, so saturate.
+fn fetch_limit(limit: usize) -> i64 {
+    i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)
+}
+
 /// Extract `cursor.firstBatch` from a find/aggregate result, applying the
 /// row cap (the command fetched limit+1 to detect more).
-fn cursor_docs(result: Document, limit: usize) -> Value {
+fn cursor_docs(result: &Document, limit: usize) -> Value {
     let batch = result
         .get_document("cursor")
         .ok()

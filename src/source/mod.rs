@@ -9,6 +9,7 @@ pub mod sql;
 pub mod ssh;
 
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::config::{EngineKind, SourceConfig};
 
@@ -21,38 +22,32 @@ pub enum Source {
 }
 
 impl Source {
-    pub fn new(name: &str, cfg: SourceConfig, force_readonly: bool) -> anyhow::Result<Self> {
+    pub fn new(name: &str, cfg: SourceConfig, force_readonly: bool) -> Self {
         match cfg.engine {
-            EngineKind::MongoDb => Ok(Source::Mongo(mongo::MongoSource::new(
-                name,
-                cfg,
-                force_readonly,
-            ))),
+            EngineKind::MongoDb => Self::Mongo(mongo::MongoSource::new(name, cfg, force_readonly)),
             // Valkey is Redis-protocol compatible; OpenSearch is ES-API
             // compatible — each rides the same source.
-            EngineKind::Redis | EngineKind::Valkey => Ok(Source::Redis(redis::RedisSource::new(
-                name,
-                cfg,
-                force_readonly,
-            ))),
-            EngineKind::Elasticsearch | EngineKind::OpenSearch | EngineKind::Qdrant => Ok(
-                Source::Rest(rest::RestSource::new(name, cfg, force_readonly)),
-            ),
-            _ => Ok(Source::Sql(sql::SqlSource::new(name, cfg, force_readonly))),
+            EngineKind::Redis | EngineKind::Valkey => {
+                Self::Redis(redis::RedisSource::new(name, cfg, force_readonly))
+            }
+            EngineKind::Elasticsearch | EngineKind::OpenSearch | EngineKind::Qdrant => {
+                Self::Rest(rest::RestSource::new(name, cfg, force_readonly))
+            }
+            _ => Self::Sql(sql::SqlSource::new(name, cfg, force_readonly)),
         }
     }
 
-    pub fn config(&self) -> &SourceConfig {
+    pub const fn config(&self) -> &SourceConfig {
         match self {
-            Source::Sql(s) => s.config(),
-            Source::Mongo(s) => s.config(),
-            Source::Redis(s) => s.config(),
-            Source::Rest(s) => s.config(),
+            Self::Sql(s) => s.config(),
+            Self::Mongo(s) => s.config(),
+            Self::Redis(s) => s.config(),
+            Self::Rest(s) => s.config(),
         }
     }
 
     /// This source's outbound redaction rules, if any.
-    pub fn pii(&self) -> Option<&crate::config::Pii> {
+    pub const fn pii(&self) -> Option<&crate::config::Pii> {
         self.config().pii.as_ref()
     }
 
@@ -68,21 +63,22 @@ impl Source {
         }
     }
 
-    pub fn readonly(&self) -> bool {
+    pub const fn readonly(&self) -> bool {
         match self {
-            Source::Sql(s) => s.readonly(),
-            Source::Mongo(s) => s.readonly(),
-            Source::Redis(s) => s.readonly(),
-            Source::Rest(s) => s.readonly(),
+            Self::Sql(s) => s.readonly(),
+            Self::Mongo(s) => s.readonly(),
+            Self::Redis(s) => s.readonly(),
+            Self::Rest(s) => s.readonly(),
         }
     }
 
     pub async fn close(&self) {
         match self {
-            Source::Sql(s) => s.close().await,
-            Source::Mongo(s) => s.close().await,
-            Source::Redis(s) => s.close().await,
-            Source::Rest(s) => s.close().await,
+            Self::Sql(s) => s.close().await,
+            Self::Mongo(s) => s.close().await,
+            // Redis' multiplexed connection and reqwest's pool are dropped
+            // with the source; there is nothing to close.
+            Self::Redis(_) | Self::Rest(_) => {}
         }
     }
 
@@ -97,7 +93,7 @@ impl Source {
     ) -> anyhow::Result<serde_json::Value> {
         use serde_json::json;
         match self {
-            Source::Sql(s) => Ok(match table {
+            Self::Sql(s) => Ok(match table {
                 Some(t) => {
                     let mut columns = s.query(&s.describe_table_sql(t, database), 500).await?;
                     let tables = vec![t.to_string()];
@@ -111,7 +107,7 @@ impl Source {
                     "tables": s.query(&s.list_tables_sql(database), 1000).await?,
                 }),
             }),
-            Source::Mongo(m) => Ok(match table {
+            Self::Mongo(m) => Ok(match table {
                 Some(c) => json!({
                     "engine": "mongodb",
                     "collection": c,
@@ -122,7 +118,7 @@ impl Source {
                     "collections": m.list_collections(database).await?,
                 }),
             }),
-            Source::Redis(r) => Ok(match table {
+            Self::Redis(r) => Ok(match table {
                 Some(key) => json!({
                     "engine": r.engine().name(),
                     "key": key,
@@ -136,7 +132,7 @@ impl Source {
             }),
             // ES/OpenSearch call these "index/indices"; Qdrant
             // "collection/collections".
-            Source::Rest(r) => {
+            Self::Rest(r) => {
                 let (one, many) = if r.engine() == EngineKind::Qdrant {
                     ("collection", "collections")
                 } else {
@@ -180,6 +176,28 @@ pub struct ResultSet {
     pub rows: Vec<Vec<serde_json::Value>>,
     pub row_count: usize,
     pub truncated: bool,
+}
+
+/// Lowercase hex, no separators.
+pub fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+            // Writing to a String cannot fail.
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+}
+
+/// Decode a byte string to JSON: text when it is valid UTF-8, a `0x…` hex dump
+/// when it is not. Shared by the SQL and Redis paths, which both hand back raw
+/// bytes an engine never promised were text.
+pub fn bytes_value(v: Vec<u8>) -> Value {
+    match String::from_utf8(v) {
+        Ok(s) => Value::String(s),
+        Err(e) => Value::String(format!("0x{}", hex(&e.into_bytes()))),
+    }
 }
 
 #[derive(Serialize)]

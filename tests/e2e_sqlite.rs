@@ -1,12 +1,16 @@
 //! End-to-end smoke test: spawn the real binary, speak JSON-RPC over stdio
 //! against a throwaway sqlite file. No docker needed, runs in `cargo test`.
 
+// clippy.toml's allow-*-in-tests only covers `#[test]` functions; the harness
+// helpers below are plain fns, and a failed unwrap there is a failed test.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 
-fn call(id: u64, tool: &str, args: Value) -> String {
+fn call(id: u64, tool: &str, args: &Value) -> String {
     json!({
         "jsonrpc": "2.0", "id": id, "method": "tools/call",
         "params": {"name": tool, "arguments": args}
@@ -107,26 +111,26 @@ fn duckdb_end_to_end() {
             call(
                 1,
                 "execute",
-                json!({"source": "duck",
+                &json!({"source": "duck",
                 "query": "CREATE TABLE widgets(id INTEGER, name TEXT, price DECIMAL(8,2), added DATE)"}),
             ),
             call(
                 2,
                 "execute",
-                json!({"source": "duck",
+                &json!({"source": "duck",
                 "query": "INSERT INTO widgets VALUES (1, 'sprocket', 9.95, DATE '2026-01-02')"}),
             ),
             call(
                 3,
                 "query",
-                json!({"source": "duck",
+                &json!({"source": "duck",
                 "query": "SELECT id, name, price, added FROM widgets"}),
             ),
-            call(4, "schema", json!({"source": "duck"})),
+            call(4, "schema", &json!({"source": "duck"})),
             call(
                 5,
                 "query",
-                json!({"source": "duck", "query": "DROP TABLE widgets"}),
+                &json!({"source": "duck", "query": "DROP TABLE widgets"}),
             ),
         ],
     );
@@ -169,38 +173,38 @@ fn sqlite_end_to_end() {
             call(
                 1,
                 "execute",
-                json!({"source": "demo",
+                &json!({"source": "demo",
                 "query": "CREATE TABLE IF NOT EXISTS widgets(id INTEGER PRIMARY KEY, name TEXT)"}),
             ),
             call(
                 2,
                 "execute",
-                json!({"source": "demo",
+                &json!({"source": "demo",
                 "query": "INSERT INTO widgets(name) VALUES ('sprocket')"}),
             ),
             call(
                 3,
                 "query",
-                json!({"source": "demo",
+                &json!({"source": "demo",
                 "query": "SELECT id, name FROM widgets"}),
             ),
             call(
                 4,
                 "query",
-                json!({"source": "demo", "query": "DROP TABLE widgets"}),
+                &json!({"source": "demo", "query": "DROP TABLE widgets"}),
             ),
             call(
                 5,
                 "execute",
-                json!({"source": "demo_ro",
+                &json!({"source": "demo_ro",
                 "query": "INSERT INTO widgets(name) VALUES ('nope')"}),
             ),
-            call(6, "list_sources", json!({})),
-            call(7, "schema", json!({"source": "demo"})),
+            call(6, "list_sources", &json!({})),
+            call(7, "schema", &json!({"source": "demo"})),
             call(
                 8,
                 "query",
-                json!({"source": "missing", "query": "SELECT 1"}),
+                &json!({"source": "missing", "query": "SELECT 1"}),
             ),
         ],
     );
@@ -279,25 +283,25 @@ fn pii_redaction_end_to_end() {
             call(
                 1,
                 "execute",
-                json!({"source": "plain",
+                &json!({"source": "plain",
                 "query": "CREATE TABLE users(id INTEGER, email TEXT, note TEXT)"}),
             ),
             call(
                 2,
                 "execute",
-                json!({"source": "plain",
+                &json!({"source": "plain",
                 "query": "INSERT INTO users VALUES (1, 'a@b.co', 'hi'), (2, NULL, 'call +45 12 34 56 78 or z@y.co')"}),
             ),
-            call(3, "query", json!({"source": "plain", "query": select})),
-            call(4, "query", json!({"source": "short", "query": select})),
-            call(5, "query", json!({"source": "qualified", "query": select})),
+            call(3, "query", &json!({"source": "plain", "query": select})),
+            call(4, "query", &json!({"source": "short", "query": select})),
+            call(5, "query", &json!({"source": "qualified", "query": select})),
             call(
                 6,
                 "query",
-                json!({"source": "qualified", "query": "SELECT note FROM (SELECT note FROM users) x"}),
+                &json!({"source": "qualified", "query": "SELECT note FROM (SELECT note FROM users) x"}),
             ),
-            call(7, "list_sources", json!({})),
-            call(8, "schema", json!({"source": "short", "table": "users"})),
+            call(7, "list_sources", &json!({})),
+            call(8, "schema", &json!({"source": "short", "table": "users"})),
         ],
     );
 

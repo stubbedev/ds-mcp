@@ -8,6 +8,8 @@
 //! Blocking columns from predicates too is a bigger change (it needs sqlguard)
 //! and deliberately not done here.
 
+use std::fmt::Write as _;
+
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -87,14 +89,15 @@ impl<'a> Filter<'a> {
         for (start, end) in spans {
             out.push_str(&s[cursor..start]);
             // `drop` cannot remove half a value, so a detected span inside a
-            // larger string is redacted (or hashed) in place.
-            out.push_str(&match self.mode {
-                PiiMode::Hash => format!(
-                    "sha256:{}",
-                    hash_prefix(&Value::String(s[start..end].into()))
-                ),
-                PiiMode::Redact | PiiMode::Drop => REDACTED.to_string(),
-            });
+            // larger string is redacted (or hashed) in place. Writing to a
+            // String cannot fail.
+            match self.mode {
+                PiiMode::Hash => {
+                    let digest = hash_prefix(&Value::String(s[start..end].into()));
+                    let _ = write!(out, "sha256:{digest}");
+                }
+                PiiMode::Redact | PiiMode::Drop => out.push_str(REDACTED),
+            }
             cursor = end;
         }
         out.push_str(&s[cursor..]);
@@ -211,7 +214,7 @@ fn hash_prefix(v: &Value) -> String {
         other => other.to_string(),
     };
     let digest = Sha256::digest(bytes.as_bytes());
-    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+    crate::source::hex(&digest[..8])
 }
 
 /// Glob match: `*` is any run of characters, everything else literal,

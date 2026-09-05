@@ -2,6 +2,7 @@
 //! One lazily-connected pool per source; rows are decoded to JSON with a
 //! per-engine try-decode chain (sqlx has no generic runtime decode).
 
+use std::fmt::Write as _;
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
@@ -14,7 +15,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqliteRow};
 use sqlx::{AssertSqlSafe, Column, Row};
 use tokio::sync::OnceCell;
 
-use super::{ExecResult, ResultSet};
+use super::{ExecResult, ResultSet, bytes_value};
 use crate::config::{EngineKind, SourceConfig};
 
 pub struct SqlSource {
@@ -44,6 +45,15 @@ pub struct ClickHouseHttp {
     url: String,
 }
 
+/// Pool shape shared by every sqlx engine here.
+fn opts<DB: sqlx::Database>(cfg: &SourceConfig) -> PoolOptions<DB> {
+    PoolOptions::new()
+        .max_connections(8)
+        .min_connections(0)
+        .idle_timeout(std::time::Duration::from_secs(300))
+        .acquire_timeout(cfg.connect_timeout())
+}
+
 impl SqlSource {
     pub fn new(name: &str, cfg: SourceConfig, force_readonly: bool) -> Self {
         let readonly = force_readonly || cfg.readonly;
@@ -56,15 +66,15 @@ impl SqlSource {
         }
     }
 
-    pub fn engine(&self) -> EngineKind {
+    pub const fn engine(&self) -> EngineKind {
         self.cfg.engine
     }
 
-    pub fn config(&self) -> &SourceConfig {
+    pub const fn config(&self) -> &SourceConfig {
         &self.cfg
     }
 
-    pub fn readonly(&self) -> bool {
+    pub const fn readonly(&self) -> bool {
         self.readonly
     }
 
@@ -73,10 +83,10 @@ impl SqlSource {
             Some(SqlPool::MySql(p)) => p.close().await,
             Some(SqlPool::Pg(p)) => p.close().await,
             Some(SqlPool::Sqlite(p)) => p.close().await,
-            Some(SqlPool::DuckDb(_)) => {}
             Some(SqlPool::Mssql(p)) => p.close(),
-            Some(SqlPool::ClickHouse(_)) => {}
-            None => {}
+            // duckdb's handle is dropped with the source and clickhouse is
+            // stateless HTTP; `None` means we never connected at all.
+            Some(SqlPool::DuckDb(_) | SqlPool::ClickHouse(_)) | None => {}
         }
     }
 
@@ -87,15 +97,18 @@ impl SqlSource {
             .with_context(|| format!("connect to source {:?}", self.name))
     }
 
+    /// Resolve the address to dial, standing up the ssh/docker forward if the
+    /// source configures one and keeping it alive for the life of the pool.
+    async fn resolve(&self, host: &str, port: u16) -> Result<(String, u16)> {
+        let ep = super::endpoint::resolve(&self.cfg, host, port).await?;
+        if let Some(t) = ep.tunnel {
+            let _ = self.tunnel.set(t);
+        }
+        Ok((ep.host, ep.port))
+    }
+
     async fn connect(&self) -> Result<SqlPool> {
         let cfg = &self.cfg;
-        fn opts<DB: sqlx::Database>(cfg: &SourceConfig) -> PoolOptions<DB> {
-            PoolOptions::new()
-                .max_connections(8)
-                .min_connections(0)
-                .idle_timeout(std::time::Duration::from_secs(300))
-                .acquire_timeout(cfg.connect_timeout())
-        }
         let default_port = match cfg.engine {
             EngineKind::MySql | EngineKind::MariaDb => 3306,
             EngineKind::Postgres => 5432,
@@ -107,55 +120,44 @@ impl SqlSource {
         // dsn below); ssh/docker blocks reroute the dial to a forward.
         let target_host = cfg.host.clone().unwrap_or_else(|| "127.0.0.1".into());
         let target_port = cfg.port.unwrap_or(default_port);
-        // Resolve for engines whose target comes from discrete fields; the
-        // dsn cases re-resolve with the dsn's own host below.
-        let resolve = async |host: &str, port: u16| -> Result<(String, u16)> {
-            let ep = super::endpoint::resolve(cfg, host, port).await?;
-            if let Some(t) = ep.tunnel {
-                let _ = self.tunnel.set(t);
-            }
-            Ok((ep.host, ep.port))
-        };
         Ok(match cfg.engine {
             EngineKind::MySql | EngineKind::MariaDb => {
-                let mut o = match &cfg.dsn {
-                    Some(dsn) => MySqlConnectOptions::from_str(dsn)?,
-                    None => {
-                        let mut o = MySqlConnectOptions::new();
-                        if let Some(u) = &cfg.user {
-                            o = o.username(u);
-                        }
-                        if let Some(p) = &cfg.password {
-                            o = o.password(p);
-                        }
-                        if let Some(d) = &cfg.database {
-                            o = o.database(d);
-                        }
-                        o.host(&target_host).port(target_port)
+                let mut o = if let Some(dsn) = &cfg.dsn {
+                    MySqlConnectOptions::from_str(dsn)?
+                } else {
+                    let mut o = MySqlConnectOptions::new();
+                    if let Some(u) = &cfg.user {
+                        o = o.username(u);
                     }
+                    if let Some(p) = &cfg.password {
+                        o = o.password(p);
+                    }
+                    if let Some(d) = &cfg.database {
+                        o = o.database(d);
+                    }
+                    o.host(&target_host).port(target_port)
                 };
-                let (host, port) = resolve(o.get_host(), o.get_port()).await?;
+                let (host, port) = self.resolve(o.get_host(), o.get_port()).await?;
                 o = o.host(&host).port(port);
                 SqlPool::MySql(opts(cfg).connect_lazy_with(o))
             }
             EngineKind::Postgres => {
-                let mut o = match &cfg.dsn {
-                    Some(dsn) => PgConnectOptions::from_str(dsn)?,
-                    None => {
-                        let mut o = PgConnectOptions::new();
-                        if let Some(u) = &cfg.user {
-                            o = o.username(u);
-                        }
-                        if let Some(p) = &cfg.password {
-                            o = o.password(p);
-                        }
-                        if let Some(d) = &cfg.database {
-                            o = o.database(d);
-                        }
-                        o.host(&target_host).port(target_port)
+                let mut o = if let Some(dsn) = &cfg.dsn {
+                    PgConnectOptions::from_str(dsn)?
+                } else {
+                    let mut o = PgConnectOptions::new();
+                    if let Some(u) = &cfg.user {
+                        o = o.username(u);
                     }
+                    if let Some(p) = &cfg.password {
+                        o = o.password(p);
+                    }
+                    if let Some(d) = &cfg.database {
+                        o = o.database(d);
+                    }
+                    o.host(&target_host).port(target_port)
                 };
-                let (host, port) = resolve(o.get_host(), o.get_port()).await?;
+                let (host, port) = self.resolve(o.get_host(), o.get_port()).await?;
                 o = o.host(&host).port(port);
                 // Defense in depth: a readonly source forces every transaction
                 // read-only at the server, so even a write the SQL guard can't
@@ -191,78 +193,8 @@ impl SqlSource {
                 .await??;
                 SqlPool::DuckDb(std::sync::Arc::new(std::sync::Mutex::new(conn)))
             }
-            EngineKind::Mssql => {
-                let (mut m, target) = match &cfg.dsn {
-                    // ADO connection string; TrustServerCertificate etc. go here.
-                    Some(dsn) => {
-                        let addr = tiberius::Config::from_ado_string(dsn)?.get_addr();
-                        let (h, p) = addr.rsplit_once(':').unwrap_or((addr.as_str(), "1433"));
-                        let target = (h.to_string(), p.parse().unwrap_or(1433));
-                        (deadpool_tiberius::Manager::from_ado_string(dsn)?, target)
-                    }
-                    None => {
-                        let mut m = deadpool_tiberius::Manager::new();
-                        if let (Some(u), Some(p)) = (&cfg.user, &cfg.password) {
-                            m = m.basic_authentication(u, p);
-                        }
-                        if let Some(d) = &cfg.database {
-                            m = m.database(d);
-                        }
-                        (m, (target_host.clone(), target_port))
-                    }
-                };
-                let (host, port) = resolve(&target.0, target.1).await?;
-                m = m
-                    .host(host)
-                    .port(port)
-                    .max_size(8)
-                    .create_timeout(cfg.connect_timeout());
-                SqlPool::Mssql(m.create_pool()?)
-            }
-            EngineKind::ClickHouse => {
-                // HTTP interface. dsn = full base URL (auth via URL params or
-                // https); discrete fields build one.
-                let mut url = match &cfg.dsn {
-                    Some(dsn) => {
-                        let mut parsed = url::Url::parse(dsn).context("parse clickhouse dsn")?;
-                        let dsn_host = parsed.host_str().unwrap_or("127.0.0.1").to_string();
-                        let dsn_port = parsed.port().unwrap_or(8123);
-                        let (host, port) = resolve(&dsn_host, dsn_port).await?;
-                        let _ = parsed.set_host(Some(&host));
-                        let _ = parsed.set_port(Some(port));
-                        parsed.to_string()
-                    }
-                    None => {
-                        let (host, port) = resolve(&target_host, target_port).await?;
-                        let mut url = format!("http://{host}:{port}/?");
-                        if let Some(u) = &cfg.user {
-                            url.push_str(&format!("user={u}&"));
-                        }
-                        if let Some(p) = &cfg.password {
-                            url.push_str(&format!("password={p}&"));
-                        }
-                        if let Some(d) = &cfg.database {
-                            url.push_str(&format!("database={d}&"));
-                        }
-                        url
-                    }
-                };
-                // collect/exec append query params directly.
-                if !url.contains('?') {
-                    url.push('?');
-                } else if !url.ends_with('?') && !url.ends_with('&') {
-                    url.push('&');
-                }
-                // Defense in depth: readonly=2 lets the server reject writes
-                // and DDL while still allowing SETTINGS on read queries.
-                if self.readonly {
-                    url.push_str("readonly=2&");
-                }
-                let client = reqwest::Client::builder()
-                    .connect_timeout(cfg.connect_timeout())
-                    .build()?;
-                SqlPool::ClickHouse(ClickHouseHttp { client, url })
-            }
+            EngineKind::Mssql => self.connect_mssql(&target_host, target_port).await?,
+            EngineKind::ClickHouse => self.connect_clickhouse(&target_host, target_port).await?,
             EngineKind::Redis
             | EngineKind::Valkey
             | EngineKind::MongoDb
@@ -272,6 +204,81 @@ impl SqlSource {
                 bail!("engine {} not handled by SqlSource", cfg.engine.name())
             }
         })
+    }
+
+    /// SQL Server. The dsn form is an ADO connection string, which carries its
+    /// own address; the discrete form dials host/port.
+    async fn connect_mssql(&self, target_host: &str, target_port: u16) -> Result<SqlPool> {
+        let cfg = &self.cfg;
+        // ADO connection string; TrustServerCertificate etc. go in there.
+        let (mut m, target) = if let Some(dsn) = &cfg.dsn {
+            let addr = tiberius::Config::from_ado_string(dsn)?.get_addr();
+            let (h, p) = addr.rsplit_once(':').unwrap_or((addr.as_str(), "1433"));
+            let target = (h.to_string(), p.parse().unwrap_or(1433));
+            (deadpool_tiberius::Manager::from_ado_string(dsn)?, target)
+        } else {
+            let mut m = deadpool_tiberius::Manager::new();
+            if let (Some(u), Some(p)) = (&cfg.user, &cfg.password) {
+                m = m.basic_authentication(u, p);
+            }
+            if let Some(d) = &cfg.database {
+                m = m.database(d);
+            }
+            (m, (target_host.to_string(), target_port))
+        };
+        let (host, port) = self.resolve(&target.0, target.1).await?;
+        m = m
+            .host(host)
+            .port(port)
+            .max_size(8)
+            .create_timeout(cfg.connect_timeout());
+        Ok(SqlPool::Mssql(m.create_pool()?))
+    }
+
+    /// `ClickHouse` speaks HTTP, so there is no pool — just a base URL with
+    /// the credentials and settings already in its query string.
+    async fn connect_clickhouse(&self, target_host: &str, target_port: u16) -> Result<SqlPool> {
+        let cfg = &self.cfg;
+        // HTTP interface. dsn = full base URL (auth via URL params or
+        // https); discrete fields build one.
+        let mut url = if let Some(dsn) = &cfg.dsn {
+            let mut parsed = url::Url::parse(dsn).context("parse clickhouse dsn")?;
+            let dsn_host = parsed.host_str().unwrap_or("127.0.0.1").to_string();
+            let dsn_port = parsed.port().unwrap_or(8123);
+            let (host, port) = self.resolve(&dsn_host, dsn_port).await?;
+            let _ = parsed.set_host(Some(&host));
+            let _ = parsed.set_port(Some(port));
+            parsed.to_string()
+        } else {
+            let (host, port) = self.resolve(target_host, target_port).await?;
+            let mut url = format!("http://{host}:{port}/?");
+            // Writing to a String cannot fail.
+            if let Some(u) = &cfg.user {
+                let _ = write!(url, "user={u}&");
+            }
+            if let Some(p) = &cfg.password {
+                let _ = write!(url, "password={p}&");
+            }
+            if let Some(d) = &cfg.database {
+                let _ = write!(url, "database={d}&");
+            }
+            url
+        };
+        // collect/exec append query params directly.
+        if !url.contains('?') {
+            url.push('?');
+        } else if !url.ends_with('?') && !url.ends_with('&') {
+            url.push('&');
+        }
+        // Defense in depth: readonly=2 lets the server reject writes
+        // and DDL while still allowing SETTINGS on read queries.
+        if self.readonly {
+            url.push_str("readonly=2&");
+        }
+        let client = reqwest::Client::builder()
+            .connect_timeout(cfg.connect_timeout())
+            .build()?;
+        Ok(SqlPool::ClickHouse(ClickHouseHttp { client, url }))
     }
 
     /// Run a query, returning at most `limit` rows (+ a truncated flag).
@@ -308,7 +315,11 @@ impl SqlSource {
                 tokio::task::spawn_blocking(move || duckdb_collect(&conn, &sql, fetch)).await??
             }
             SqlPool::Mssql(p) => {
-                let mut conn = p.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                // Boxed: deadpool-tiberius' checkout future is ~19KB, and it
+                // would otherwise sit inline in every caller of this fn.
+                let mut conn = Box::pin(p.get())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
                 mssql_collect(&mut conn, sql, fetch).await?
             }
             SqlPool::ClickHouse(ch) => clickhouse_collect(ch, sql, fetch).await?,
@@ -351,7 +362,9 @@ impl SqlSource {
                 let conn = std::sync::Arc::clone(conn);
                 let sql = sql.to_owned();
                 let affected = tokio::task::spawn_blocking(move || {
-                    let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+                    let conn = conn
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     conn.execute(&sql, [])
                 })
                 .await??;
@@ -361,7 +374,11 @@ impl SqlSource {
                 }
             }
             SqlPool::Mssql(p) => {
-                let mut conn = p.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                // Boxed: deadpool-tiberius' checkout future is ~19KB, and it
+                // would otherwise sit inline in every caller of this fn.
+                let mut conn = Box::pin(p.get())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
                 let r = conn.execute(sql.to_owned(), &[]).await?;
                 ExecResult {
                     rows_affected: r.total(),
@@ -382,7 +399,8 @@ impl SqlSource {
     pub fn list_tables_sql(&self, database: Option<&str>) -> String {
         let db = database.or(self.cfg.database.as_deref());
         match self.engine() {
-            EngineKind::MySql | EngineKind::MariaDb => match db {
+            // ClickHouse speaks MySQL's SHOW TABLES here.
+            EngineKind::MySql | EngineKind::MariaDb | EngineKind::ClickHouse => match db {
                 Some(db) => format!("SHOW TABLES FROM {}", quote_ident_mysql(db)),
                 None => "SHOW TABLES".into(),
             },
@@ -404,10 +422,6 @@ impl SqlSource {
                 "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name".into()
             }
             EngineKind::DuckDb => "SHOW TABLES".into(),
-            EngineKind::ClickHouse => match db {
-                Some(db) => format!("SHOW TABLES FROM {}", quote_ident_mysql(db)),
-                None => "SHOW TABLES".into(),
-            },
             EngineKind::Mssql => {
                 let prefix = db
                     .map(|d| format!("{}.", quote_ident_bracket(d)))
@@ -517,8 +531,8 @@ async fn collect<R>(
     Ok((columns, rows))
 }
 
-/// ClickHouse HTTP: append FORMAT JSONCompact and parse {meta, data}.
-/// max_result_rows/break caps the result server-side.
+/// `ClickHouse` HTTP: append FORMAT `JSONCompact` and parse {meta, data}.
+/// `max_result_rows/break` caps the result server-side.
 async fn clickhouse_collect(
     ch: &ClickHouseHttp,
     sql: &str,
@@ -567,37 +581,42 @@ async fn clickhouse_exec(ch: &ClickHouseHttp, sql: &str) -> Result<()> {
     Ok(())
 }
 
+// The guard is already scoped as tightly as the borrows allow: `stmt` and
+// `rows_iter` both hold a reference to it, so it cannot drop before the scan
+// ends.
+#[allow(clippy::significant_drop_tightening)]
 fn duckdb_collect(
     conn: &std::sync::Mutex<duckdb::Connection>,
     sql: &str,
     fetch: usize,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
-    let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
-    let mut stmt = conn.prepare(sql)?;
-    let mut rows_iter = stmt.query([])?;
     let mut columns: Vec<String> = Vec::new();
     let mut rows = Vec::new();
-    while let Some(row) = rows_iter.next()? {
-        if columns.is_empty() {
-            columns = row
-                .as_ref()
-                .column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-        }
-        rows.push(
-            (0..columns.len())
-                .map(|i| {
-                    duckdb_value(
-                        row.get::<_, duckdb::types::Value>(i)
-                            .unwrap_or(duckdb::types::Value::Null),
-                    )
-                })
-                .collect(),
-        );
-        if rows.len() >= fetch {
-            break;
+    {
+        // Scoped: `stmt` and `rows_iter` borrow the guard, so the connection
+        // stays locked only for the duration of the scan.
+        let conn = conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut stmt = conn.prepare(sql)?;
+        let mut rows_iter = stmt.query([])?;
+        while let Some(row) = rows_iter.next()? {
+            if columns.is_empty() {
+                columns.clone_from(&row.as_ref().column_names());
+            }
+            rows.push(
+                (0..columns.len())
+                    .map(|i| {
+                        duckdb_value(
+                            row.get::<_, duckdb::types::Value>(i)
+                                .unwrap_or(duckdb::types::Value::Null),
+                        )
+                    })
+                    .collect(),
+            );
+            if rows.len() >= fetch {
+                break;
+            }
         }
     }
     Ok((columns, rows))
@@ -617,7 +636,7 @@ fn duckdb_value(v: duckdb::types::Value) -> Value {
         D::USmallInt(n) => Value::from(n),
         D::UInt(n) => Value::from(n),
         D::UBigInt(n) => Value::from(n),
-        D::Float(f) => num_f64(f as f64),
+        D::Float(f) => num_f64(f64::from(f)),
         D::Double(f) => num_f64(f),
         D::Decimal(d) => Value::String(d.to_string()),
         D::Text(s) | D::Enum(s) => Value::String(s),
@@ -629,16 +648,20 @@ fn duckdb_value(v: duckdb::types::Value) -> Value {
             }
         }
         D::Date32(days) => chrono::NaiveDate::from_num_days_from_ce_opt(days + 719_163)
-            .map(|d| Value::String(d.to_string()))
-            .unwrap_or(Value::Null),
+            .map_or(Value::Null, |d| Value::String(d.to_string())),
         D::Time64(unit, n) => {
             let micros = to_micros(unit, n);
-            chrono::NaiveTime::from_num_seconds_from_midnight_opt(
-                (micros / 1_000_000) as u32,
-                ((micros % 1_000_000) * 1000) as u32,
-            )
-            .map(|t| Value::String(t.to_string()))
-            .unwrap_or(Value::Null)
+            // A negative or out-of-day value is not a time; `from_...opt`
+            // would reject it anyway, so a failed conversion is the same NULL.
+            let seconds = u32::try_from(micros / 1_000_000);
+            let nanos = u32::try_from((micros % 1_000_000) * 1000);
+            match (seconds, nanos) {
+                (Ok(seconds), Ok(nanos)) => {
+                    chrono::NaiveTime::from_num_seconds_from_midnight_opt(seconds, nanos)
+                        .map_or(Value::Null, |t| Value::String(t.to_string()))
+                }
+                _ => Value::Null,
+            }
         }
         D::List(items) | D::Array(items) => {
             Value::Array(items.into_iter().map(duckdb_value).collect())
@@ -653,7 +676,7 @@ fn duckdb_value(v: duckdb::types::Value) -> Value {
     }
 }
 
-fn to_micros(unit: duckdb::types::TimeUnit, n: i64) -> i64 {
+const fn to_micros(unit: duckdb::types::TimeUnit, n: i64) -> i64 {
     use duckdb::types::TimeUnit;
     match unit {
         TimeUnit::Second => n * 1_000_000,
@@ -689,31 +712,22 @@ fn mssql_row_values(row: &tiberius::Row) -> Vec<Value> {
     row.cells()
         .enumerate()
         .map(|(i, (_, data))| match data {
-            C::U8(v) => v.map(Value::from).unwrap_or(Value::Null),
-            C::I16(v) => v.map(Value::from).unwrap_or(Value::Null),
-            C::I32(v) => v.map(Value::from).unwrap_or(Value::Null),
-            C::I64(v) => v.map(Value::from).unwrap_or(Value::Null),
-            C::F32(v) => v.map(|v| num_f64(v as f64)).unwrap_or(Value::Null),
-            C::F64(v) => v.map(num_f64).unwrap_or(Value::Null),
-            C::Bit(v) => v.map(Value::Bool).unwrap_or(Value::Null),
+            C::U8(v) => v.map_or(Value::Null, Value::from),
+            C::I16(v) => v.map_or(Value::Null, Value::from),
+            C::I32(v) => v.map_or(Value::Null, Value::from),
+            C::I64(v) => v.map_or(Value::Null, Value::from),
+            C::F32(v) => v.map_or(Value::Null, |v| num_f64(f64::from(v))),
+            C::F64(v) => v.map_or(Value::Null, num_f64),
+            C::Bit(v) => v.map_or(Value::Null, Value::Bool),
             C::String(v) => v
                 .as_ref()
-                .map(|v| Value::String(v.to_string()))
-                .unwrap_or(Value::Null),
-            C::Guid(v) => v
-                .map(|v| Value::String(v.to_string()))
-                .unwrap_or(Value::Null),
-            C::Binary(v) => v
-                .as_ref()
-                .map(|v| bytes_value(v.to_vec()))
-                .unwrap_or(Value::Null),
-            C::Numeric(v) => v
-                .map(|v| Value::String(v.to_string()))
-                .unwrap_or(Value::Null),
+                .map_or(Value::Null, |v| Value::String(v.to_string())),
+            C::Guid(v) => v.map_or(Value::Null, |v| Value::String(v.to_string())),
+            C::Binary(v) => v.as_ref().map_or(Value::Null, |v| bytes_value(v.to_vec())),
+            C::Numeric(v) => v.map_or(Value::Null, |v| Value::String(v.to_string())),
             C::Xml(v) => v
                 .as_ref()
-                .map(|v| Value::String(v.to_string()))
-                .unwrap_or(Value::Null),
+                .map_or(Value::Null, |v| Value::String(v.to_string())),
             // Temporal TDS types: re-decode through chrono (feature-gated
             // FromSql impls) instead of converting raw wire structs by hand.
             C::Date(_) => decode_time::<chrono::NaiveDate>(row, i),
@@ -725,8 +739,7 @@ fn mssql_row_values(row: &tiberius::Row) -> Vec<Value> {
                 .try_get::<chrono::DateTime<chrono::Utc>, _>(i)
                 .ok()
                 .flatten()
-                .map(|v| Value::String(v.to_rfc3339()))
-                .unwrap_or(Value::Null),
+                .map_or(Value::Null, |v| Value::String(v.to_rfc3339())),
         })
         .collect()
 }
@@ -735,8 +748,7 @@ fn decode_time<'a, T: tiberius::FromSql<'a> + ToString>(row: &'a tiberius::Row, 
     row.try_get::<T, _>(i)
         .ok()
         .flatten()
-        .map(|v| Value::String(v.to_string()))
-        .unwrap_or(Value::Null)
+        .map_or(Value::Null, |v| Value::String(v.to_string()))
 }
 
 fn columns_of_mysql(row: &MySqlRow) -> Vec<String> {
@@ -771,19 +783,6 @@ fn num_f64(v: f64) -> Value {
     serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number)
 }
 
-fn bytes_value(v: Vec<u8>) -> Value {
-    match String::from_utf8(v) {
-        Ok(s) => Value::String(s),
-        Err(e) => Value::String(format!(
-            "0x{}",
-            e.into_bytes()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        )),
-    }
-}
-
 fn mysql_value(row: &MySqlRow, i: usize) -> Value {
     try_decode!(row, i, [
         i64 => |v: i64| Value::from(v),
@@ -807,7 +806,7 @@ fn pg_value(row: &PgRow, i: usize) -> Value {
         i16 => |v: i16| Value::from(v),
         i32 => |v: i32| Value::from(v),
         i64 => |v: i64| Value::from(v),
-        f32 => |v: f32| num_f64(v as f64),
+        f32 => |v: f32| num_f64(f64::from(v)),
         f64 => num_f64,
         rust_decimal::Decimal => |v: rust_decimal::Decimal| Value::String(v.to_string()),
         bool => Value::Bool,

@@ -90,27 +90,25 @@ async fn serve(
     http_addr: Option<String>,
     read_only: bool,
 ) -> Result<()> {
-    let cfg = match &config_path {
-        // An explicit --config that fails to load is fatal.
-        Some(p) => Some(config::load(p)?),
-        None => match config::default_path_global().filter(|p| p.exists()) {
-            Some(p) => Some(config::load(&p)?),
-            // Roots-only mode: clients supply sources via a .ds-mcp.json at
-            // their workspace root.
-            None => {
-                tracing::warn!(
-                    "no global config found; running in roots-only mode \
-                     (clients need a {} in a workspace root)",
-                    config::ROOT_CONFIG_NAME
-                );
-                None
-            }
-        },
+    // An explicit --config that fails to load is fatal; a missing global one
+    // is not.
+    let path = config_path
+        .clone()
+        .or_else(|| config::default_path_global().filter(|p| p.exists()));
+    let cfg = if let Some(p) = &path {
+        Some(config::load(p)?)
+    } else {
+        // Roots-only mode: clients supply sources via a .ds-mcp.json at their
+        // workspace root.
+        tracing::warn!(
+            "no global config found; running in roots-only mode \
+             (clients need a {} in a workspace root)",
+            config::ROOT_CONFIG_NAME
+        );
+        None
     };
     let http_cfg = cfg.as_ref().map(|c| c.http.clone()).unwrap_or_default();
-    let global = cfg
-        .map(|c| registry::Registry::new(c, read_only).map(Arc::new))
-        .transpose()?;
+    let global = cfg.map(|c| Arc::new(registry::Registry::new(c, read_only)));
     let resolver = Arc::new(registry::Resolver::new(global, read_only));
     let server = tools::DsServer::new(Arc::clone(&resolver));
 

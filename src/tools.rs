@@ -1,7 +1,7 @@
 //! The MCP tool surface: five engine-agnostic tools. `query`/`execute` take
 //! an engine-native payload (SQL string, Mongo command document, Redis
 //! command array) and dispatch internally. All failures are tool results
-//! (is_error), never protocol errors, so the model always sees the message.
+//! (`is_error`), never protocol errors, so the model always sees the message.
 
 // Helpers use Result<T, CallToolResult> so `?`-style early returns produce
 // the error tool result; the Err size is irrelevant here.
@@ -31,7 +31,7 @@ use crate::source::Source;
 pub struct DsServer {
     resolver: Arc<Resolver>,
     /// Workspace roots fetched from this session's client; cleared on
-    /// roots/list_changed. One DsServer instance == one session.
+    /// `roots/list_changed`. One `DsServer` instance == one session.
     roots_cache: Arc<tokio::sync::Mutex<Option<Vec<std::path::PathBuf>>>>,
     tool_router: ToolRouter<Self>,
 }
@@ -60,7 +60,7 @@ const DEFAULT_ROW_LIMIT: usize = 1000;
 
 #[derive(Deserialize, JsonSchema)]
 pub struct SourceArg {
-    /// Name of the configured source (see list_sources).
+    /// Name of the configured source (see `list_sources`).
     pub source: String,
 }
 
@@ -81,13 +81,13 @@ pub struct QueryArgs {
     /// - SQL engines: a single SELECT/SHOW/DESCRIBE/EXPLAIN string.
     /// - MongoDB: a command document, e.g. {"find": "widgets", "filter": {"qty": {"$gte": 1}}}
     ///   or {"aggregate": "widgets", "pipeline": [...]}. Extended JSON is honored.
-    /// - Redis/Valkey: a command array, e.g. ["GET", "widget:1"].
+    /// - Redis/Valkey: a command array, e.g. `["GET", "widget:1"]`.
     /// - Elasticsearch/OpenSearch/Qdrant: a REST request document, e.g.
-    ///   {"method": "GET", "path": "/widgets/_search", "body": {"query": {"match_all": {}}}}
-    ///   or {"method": "POST", "path": "/collections/widgets/points/search", "body": {...}}.
+    ///   `{"method": "GET", "path": "/widgets/_search", "body": {"query": {"match_all": {}}}}`
+    ///   or `{"method": "POST", "path": "/collections/widgets/points/search", "body": {...}}`.
     pub query: Value,
     /// Database override: for MongoDB the database name (defaults to the
-    /// source's default_database); for Redis/Valkey the numeric db index
+    /// source's `default_database`); for Redis/Valkey the numeric db index
     /// (defaults to the source's configured db, else 0).
     pub database: Option<String>,
     /// Max rows/documents to return (SQL + Mongo find/aggregate). Default 1000.
@@ -101,13 +101,13 @@ pub struct ExecuteArgs {
     /// - SQL engines: any statement (INSERT/UPDATE/DELETE/CREATE/ALTER/...).
     /// - MongoDB: a command document, e.g. {"insert": "widgets", "documents": [...]},
     ///   {"update": ...}, {"delete": ...}, {"createIndexes": ...}, {"drop": ...}.
-    /// - Redis/Valkey: a command array, e.g. ["SET", "widget:1", "sprocket"].
+    /// - Redis/Valkey: a command array, e.g. `["SET", "widget:1", "sprocket"]`.
     /// - Elasticsearch/OpenSearch/Qdrant: a REST request document, e.g.
-    ///   {"method": "POST", "path": "/widgets/_doc", "body": {...}} or
-    ///   {"method": "PUT", "path": "/collections/widgets/points", "body": {...}}.
+    ///   `{"method": "POST", "path": "/widgets/_doc", "body": {...}}` or
+    ///   `{"method": "PUT", "path": "/collections/widgets/points", "body": {...}}`.
     pub query: Value,
     /// Database override: for MongoDB the database name (defaults to the
-    /// source's default_database); for Redis/Valkey the numeric db index
+    /// source's `default_database`); for Redis/Valkey the numeric db index
     /// (defaults to the source's configured db, else 0).
     pub database: Option<String>,
 }
@@ -124,7 +124,7 @@ impl DsServer {
     /// Which registry does this call use? Precedence:
     /// 1. roots injected via HTTP headers (request-scoped, never cached),
     /// 2. the client's roots/list (cached per session, cleared on
-    ///    roots/list_changed; per-root registries cached by config mtime),
+    ///    `roots/list_changed`; per-root registries cached by config mtime),
     /// 3. the global config registry.
     async fn registry(&self, ctx: &RequestContext<RoleServer>) -> Result<Arc<Registry>, String> {
         if let Some(parts) = ctx.extensions.get::<http::request::Parts>() {
@@ -308,9 +308,8 @@ fn as_rest_request(v: Value) -> Result<(String, String, Option<Value>), CallTool
         None => "GET".to_string(),
         Some(_) => return Err(err("`method` must be a string (GET/POST/PUT/DELETE/...)")),
     };
-    let path = match obj.remove("path") {
-        Some(Value::String(p)) => p,
-        _ => return Err(err("`path` is required, e.g. \"/idx/_search\"")),
+    let Some(Value::String(path)) = obj.remove("path") else {
+        return Err(err("`path` is required, e.g. `/idx/_search`"));
     };
     let body = obj.remove("body").filter(|b| !b.is_null());
     Ok((method, path, body))
@@ -383,7 +382,7 @@ impl DsServer {
             }
             Ok(serde_json::json!({
                 "ok": true,
-                "latency_ms": start.elapsed().as_millis() as u64,
+                "latency_ms": u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
             }))
         })
         .await
@@ -563,6 +562,9 @@ impl DsServer {
     }
 }
 
+// Signatures are fixed by the trait (and by `#[tool_handler]`, which expands
+// into this block); several handlers have nothing to await.
+#[allow(clippy::unused_async_trait_impl)]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for DsServer {
     async fn on_roots_list_changed(&self, _context: NotificationContext<RoleServer>) {

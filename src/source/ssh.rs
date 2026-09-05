@@ -34,6 +34,8 @@ struct HostKeyCheck {
 impl client::Handler for HostKeyCheck {
     type Error = russh::Error;
 
+    // Signature fixed by the trait; the check is local and synchronous.
+    #[allow(clippy::unused_async_trait_impl)]
     async fn check_server_key(
         &mut self,
         key: &russh::keys::PublicKey,
@@ -193,8 +195,7 @@ async fn authenticate(session: &mut client::Handle<HostKeyCheck>, cfg: &SshConfi
             let ok = session
                 .authenticate_publickey_with(cfg.user.clone(), key, hash, &mut agent)
                 .await
-                .map(|r| r.success())
-                .unwrap_or(false);
+                .is_ok_and(|r| r.success());
             if ok {
                 return Ok(());
             }

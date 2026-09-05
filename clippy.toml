@@ -1,0 +1,4 @@
+# Unit tests live in `#[cfg(test)]` modules full of `unwrap()`, which is the
+# right tool there: a failed unwrap is a failed test. Production code denies it
+# (see [lints.clippy] in Cargo.toml).
+allow-unwrap-in-tests = true

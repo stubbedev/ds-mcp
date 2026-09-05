@@ -76,7 +76,7 @@
           "$ref": "#/$defs/EngineKind"
         },
         "description": {
-          "description": "Free-text description surfaced via list_sources so a model can pick\nthe right source unaided.",
+          "description": "Free-text description surfaced via `list_sources` so a model can pick\nthe right source unaided.",
           "type": [
             "string",
             "null"
@@ -315,12 +315,12 @@
           ]
         },
         "use_agent": {
-          "description": "Use the running ssh-agent (SSH_AUTH_SOCK). With no identity_file,\npassword or use_agent configured, the agent and then ~/.ssh default\nkeys are tried automatically.",
+          "description": "Use the running ssh-agent (`SSH_AUTH_SOCK`). With no `identity_file`,\npassword or `use_agent` configured, the agent and then ~/.ssh default\nkeys are tried automatically.",
           "type": "boolean",
           "default": false
         },
         "known_hosts_file": {
-          "description": "known_hosts file used for host-key verification. Default ~/.ssh/known_hosts.",
+          "description": "`known_hosts` file used for host-key verification. Default ~/.`ssh/known_hosts`.",
           "type": [
             "string",
             "null"

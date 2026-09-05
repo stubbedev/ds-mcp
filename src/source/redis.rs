@@ -29,7 +29,7 @@ pub struct RedisSource {
 /// not `EVAL`/`SORT`. Container commands with mixed read/write subcommands
 /// (`CONFIG`, `MEMORY`) are NOT here — they are gated per-subcommand below.
 /// `PFCOUNT` is deliberately absent: Redis flags it a write (it may rewrite the
-/// HyperLogLog's cached cardinality and replicates), so it belongs on `execute`.
+/// `HyperLogLog`'s cached cardinality and replicates), so it belongs on `execute`.
 const READ_COMMANDS: &[&str] = &[
     "GET",
     "MGET",
@@ -158,19 +158,17 @@ impl RedisSource {
         }
     }
 
-    pub fn engine(&self) -> EngineKind {
+    pub const fn engine(&self) -> EngineKind {
         self.cfg.engine
     }
 
-    pub fn config(&self) -> &SourceConfig {
+    pub const fn config(&self) -> &SourceConfig {
         &self.cfg
     }
 
-    pub fn readonly(&self) -> bool {
+    pub const fn readonly(&self) -> bool {
         self.readonly
     }
-
-    pub async fn close(&self) {}
 
     /// The source's configured database (the `/N` in the URL). Defaults to `0`.
     fn configured_db(&self) -> &str {
@@ -180,32 +178,29 @@ impl RedisSource {
     /// Build the redis URL for `db`, resolving the endpoint (and opening a
     /// tunnel if configured). Returns the URL and the tunnel to keep alive.
     async fn build_url(&self, db: &str) -> Result<(String, Option<super::ssh::SshTunnel>)> {
-        match &self.cfg.dsn {
-            Some(dsn) => {
-                let mut parsed = url::Url::parse(dsn).context("parse redis dsn")?;
-                let host = parsed.host_str().unwrap_or("127.0.0.1").to_string();
-                let port = parsed.port().unwrap_or(6379);
-                let ep = super::endpoint::resolve(&self.cfg, &host, port).await?;
-                let _ = parsed.set_host(Some(&ep.host));
-                let _ = parsed.set_port(Some(ep.port));
-                parsed.set_path(&format!("/{db}"));
-                Ok((parsed.to_string(), ep.tunnel))
-            }
-            None => {
-                let target = self.cfg.host.as_deref().unwrap_or("127.0.0.1");
-                let ep = super::endpoint::resolve(&self.cfg, target, self.cfg.port.unwrap_or(6379))
-                    .await?;
-                let auth = self
-                    .cfg
-                    .password
-                    .as_ref()
-                    .map(|p| format!(":{p}@"))
-                    .unwrap_or_default();
-                Ok((
-                    format!("redis://{auth}{}:{}/{db}", ep.host, ep.port),
-                    ep.tunnel,
-                ))
-            }
+        if let Some(dsn) = &self.cfg.dsn {
+            let mut parsed = url::Url::parse(dsn).context("parse redis dsn")?;
+            let host = parsed.host_str().unwrap_or("127.0.0.1").to_string();
+            let port = parsed.port().unwrap_or(6379);
+            let ep = super::endpoint::resolve(&self.cfg, &host, port).await?;
+            let _ = parsed.set_host(Some(&ep.host));
+            let _ = parsed.set_port(Some(ep.port));
+            parsed.set_path(&format!("/{db}"));
+            Ok((parsed.to_string(), ep.tunnel))
+        } else {
+            let target = self.cfg.host.as_deref().unwrap_or("127.0.0.1");
+            let ep =
+                super::endpoint::resolve(&self.cfg, target, self.cfg.port.unwrap_or(6379)).await?;
+            let auth = self
+                .cfg
+                .password
+                .as_ref()
+                .map(|p| format!(":{p}@"))
+                .unwrap_or_default();
+            Ok((
+                format!("redis://{auth}{}:{}/{db}", ep.host, ep.port),
+                ep.tunnel,
+            ))
         }
     }
 
@@ -254,7 +249,9 @@ impl RedisSource {
         for arg in args {
             cmd.arg(arg.as_str());
         }
-        let mut conn = self.conn(db.unwrap_or(self.configured_db())).await?;
+        let mut conn = self
+            .conn(db.unwrap_or_else(|| self.configured_db()))
+            .await?;
         Ok(redis_to_json(cmd.query_async(&mut conn).await?))
     }
 
@@ -266,9 +263,8 @@ impl RedisSource {
 fn redis_to_json(v: redis::Value) -> Value {
     use redis::Value as R;
     match v {
-        R::Nil => Value::Null,
         R::Int(n) => Value::from(n),
-        R::BulkString(bytes) => bytes_to_json(bytes),
+        R::BulkString(bytes) => super::bytes_value(bytes),
         R::Array(items) | R::Set(items) => {
             Value::Array(items.into_iter().map(redis_to_json).collect())
         }
@@ -291,22 +287,11 @@ fn redis_to_json(v: redis::Value) -> Value {
         R::Boolean(b) => Value::Bool(b),
         R::VerbatimString { text, .. } => Value::String(text),
         R::BigNumber(n) => Value::String(format!("{n:?}")),
-        R::Push { .. } => Value::Null,
+        // Nil is "no value"; a Push is a pubsub frame with no place in a
+        // query result. Both are null.
+        R::Nil | R::Push { .. } => Value::Null,
         R::ServerError(e) => Value::String(format!("error: {e:?}")),
         other => Value::String(format!("{other:?}")),
-    }
-}
-
-fn bytes_to_json(bytes: Vec<u8>) -> Value {
-    match String::from_utf8(bytes) {
-        Ok(s) => Value::String(s),
-        Err(e) => Value::String(format!(
-            "0x{}",
-            e.into_bytes()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        )),
     }
 }
 
@@ -315,7 +300,7 @@ mod tests {
     use super::*;
 
     fn cmd(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
+        parts.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]

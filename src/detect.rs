@@ -106,7 +106,7 @@ pub fn spans(s: &str, enabled: Option<&[String]>) -> Vec<(usize, usize)> {
     // One pass over the string rejects the overwhelming majority of cells
     // before any span-finding runs.
     let mut spans: Vec<(usize, usize)> = Vec::new();
-    for i in c.set.matches(s).iter() {
+    for i in &c.set.matches(s) {
         let d = &DETECTORS[i];
         if !on(d) {
             continue;
@@ -156,7 +156,7 @@ fn luhn(s: &str) -> bool {
 fn iban(s: &str) -> bool {
     let compact: String = s
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .map(|c| c.to_ascii_uppercase())
         .collect();
     if !(15..=34).contains(&compact.len()) {
@@ -220,7 +220,10 @@ mod tests {
             found("key AKIAIOSFODNN7EXAMPLE leaked"),
             vec!["AKIAIOSFODNN7EXAMPLE"]
         );
-        assert!(found("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdef").len() == 1);
+        assert_eq!(
+            found("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdef").len(),
+            1
+        );
         assert_eq!(found("-----BEGIN RSA PRIVATE KEY-----").len(), 1);
     }
 

@@ -90,21 +90,21 @@ pub enum EngineKind {
 }
 
 impl EngineKind {
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
-            EngineKind::MySql => "mysql",
-            EngineKind::MariaDb => "mariadb",
-            EngineKind::Postgres => "postgres",
-            EngineKind::Sqlite => "sqlite",
-            EngineKind::DuckDb => "duckdb",
-            EngineKind::Mssql => "mssql",
-            EngineKind::ClickHouse => "clickhouse",
-            EngineKind::Redis => "redis",
-            EngineKind::Valkey => "valkey",
-            EngineKind::MongoDb => "mongodb",
-            EngineKind::Elasticsearch => "elasticsearch",
-            EngineKind::OpenSearch => "opensearch",
-            EngineKind::Qdrant => "qdrant",
+            Self::MySql => "mysql",
+            Self::MariaDb => "mariadb",
+            Self::Postgres => "postgres",
+            Self::Sqlite => "sqlite",
+            Self::DuckDb => "duckdb",
+            Self::Mssql => "mssql",
+            Self::ClickHouse => "clickhouse",
+            Self::Redis => "redis",
+            Self::Valkey => "valkey",
+            Self::MongoDb => "mongodb",
+            Self::Elasticsearch => "elasticsearch",
+            Self::OpenSearch => "opensearch",
+            Self::Qdrant => "qdrant",
         }
     }
 }
@@ -114,7 +114,7 @@ impl EngineKind {
 pub struct SourceConfig {
     /// Database engine.
     pub engine: EngineKind,
-    /// Free-text description surfaced via list_sources so a model can pick
+    /// Free-text description surfaced via `list_sources` so a model can pick
     /// the right source unaided.
     pub description: Option<String>,
     /// Refuse all write tools on this source.
@@ -172,19 +172,19 @@ pub struct SshConfig {
     pub identity_file: Option<String>,
     /// Passphrase for the private key. Supports `${ENV_VAR}` expansion.
     pub passphrase: Option<String>,
-    /// Use the running ssh-agent (SSH_AUTH_SOCK). With no identity_file,
-    /// password or use_agent configured, the agent and then ~/.ssh default
+    /// Use the running ssh-agent (`SSH_AUTH_SOCK`). With no `identity_file`,
+    /// password or `use_agent` configured, the agent and then ~/.ssh default
     /// keys are tried automatically.
     #[serde(default)]
     pub use_agent: bool,
-    /// known_hosts file used for host-key verification. Default ~/.ssh/known_hosts.
+    /// `known_hosts` file used for host-key verification. Default ~/.`ssh/known_hosts`.
     pub known_hosts_file: Option<String>,
     /// Skip host-key verification. Do not use outside throwaway environments.
     #[serde(default)]
     pub insecure_ignore_host_key: bool,
 }
 
-fn default_ssh_port() -> u16 {
+const fn default_ssh_port() -> u16 {
     22
 }
 
@@ -279,9 +279,9 @@ impl Pii {
     /// The rules to apply, or None when this source redacts nothing.
     pub fn resolve(&self) -> Option<PiiRuleset<'_>> {
         match self {
-            Pii::Enabled(false) => None,
-            Pii::Enabled(true) => Some((default_pii_columns(), None, PiiMode::Redact)),
-            Pii::Rules(r) => Some((
+            Self::Enabled(false) => None,
+            Self::Enabled(true) => Some((default_pii_columns(), None, PiiMode::Redact)),
+            Self::Rules(r) => Some((
                 match r.columns.as_deref() {
                     Some(columns) => columns,
                     None => default_pii_columns(),
@@ -317,7 +317,7 @@ pub fn default_path_global() -> Option<PathBuf> {
 pub fn load(path: &Path) -> Result<Config> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
-    let dir = path.parent().unwrap_or(Path::new("."));
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let dotenv = load_dotenv(&dir.join(".env"));
     let mut cfg =
         parse_with_env(&raw, &dotenv).with_context(|| format!("config {}", path.display()))?;

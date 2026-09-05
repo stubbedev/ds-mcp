@@ -6,6 +6,26 @@ description = "DataStore MCP — multi-engine data-source MCP server"
 license = "MIT"
 repository = "https://github.com/stubbedev/ds-mcp"
 
+# Panic guard rails. Every one of these is at zero hits in non-test code
+# today; denying them keeps a crash from being introduced by accident, in a
+# server whose whole job is to stay up. `expect` stays allowed: an expect with
+# a message is how an invariant documents itself (`src/detect.rs` compiling its
+# own constant patterns, `src/http.rs` installing SIGTERM).
+# Tests opt out via clippy.toml; `tests/` helpers do it at the file level.
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+panic_in_result_fn = "deny"
+todo = "deny"
+unimplemented = "deny"
+exit = "deny"
+# The only nursery lint we turn back off. Every one of its suggestions here
+# replaces a readable `match`/`if let` with a `map_or_else` whose two closures
+# read backwards (`map_or_else(default, |x| x)`), and it is nursery precisely
+# because that judgement is not settled.
+option_if_let_else = "allow"
+
 [profile.release]
 strip = true
 lto = "thin"

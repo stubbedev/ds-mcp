@@ -2,6 +2,8 @@
 //! plus /healthz. No auth layer — bind loopback (default) or put a proxy in
 //! front.
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use rmcp::transport::StreamableHttpService;
 use rmcp::transport::streamable_http_server::StreamableHttpServerConfig;
@@ -46,7 +48,7 @@ pub async fn serve(
     }
 
     let service: StreamableHttpService<DsServer, LocalSessionManager> =
-        StreamableHttpService::new(move || Ok(server.clone()), Default::default(), config);
+        StreamableHttpService::new(move || Ok(server.clone()), Arc::default(), config);
 
     let router = axum::Router::new()
         .nest_service(cfg.path.as_str(), service)

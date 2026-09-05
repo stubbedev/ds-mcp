@@ -1,5 +1,5 @@
 //! REST sources: a thin pass-through over an HTTP+JSON API. Elasticsearch,
-//! OpenSearch (ES-API compatible) and Qdrant all share this — the tool layer
+//! `OpenSearch` (ES-API compatible) and Qdrant all share this — the tool layer
 //! sends a request document ({"method": "GET", "path": "/idx/_search",
 //! "body": {...}}). Read-only sources are gated by a method+path classifier so
 //! mutating endpoints are refused and pointed at `execute`.
@@ -127,21 +127,19 @@ impl RestSource {
         }
     }
 
-    pub fn engine(&self) -> EngineKind {
+    pub const fn engine(&self) -> EngineKind {
         self.cfg.engine
     }
 
-    pub fn config(&self) -> &SourceConfig {
+    pub const fn config(&self) -> &SourceConfig {
         &self.cfg
     }
 
-    pub fn readonly(&self) -> bool {
+    pub const fn readonly(&self) -> bool {
         self.readonly
     }
 
-    pub async fn close(&self) {}
-
-    fn default_port(&self) -> u16 {
+    const fn default_port(&self) -> u16 {
         match self.cfg.engine {
             EngineKind::Qdrant => 6333,
             _ => 9200, // elasticsearch / opensearch
@@ -159,13 +157,15 @@ impl RestSource {
                         let u = url::Url::parse(dsn).context("parse dsn")?;
                         let scheme = u.scheme().to_string();
                         let host = u.host_str().unwrap_or("127.0.0.1").to_string();
-                        let port = u.port_or_known_default().unwrap_or(self.default_port());
+                        let port = u
+                            .port_or_known_default()
+                            .unwrap_or_else(|| self.default_port());
                         (scheme, host, port)
                     }
                     None => (
                         "http".to_string(),
                         self.cfg.host.as_deref().unwrap_or("127.0.0.1").to_string(),
-                        self.cfg.port.unwrap_or(self.default_port()),
+                        self.cfg.port.unwrap_or_else(|| self.default_port()),
                     ),
                 };
                 let ep = super::endpoint::resolve(&self.cfg, &host, port).await?;

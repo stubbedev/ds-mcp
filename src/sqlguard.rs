@@ -66,8 +66,8 @@ fn ensure_stmt_read_only(stmt: &Statement) -> Result<(), String> {
         // flag — so recurse unconditionally: the inner statement must itself be
         // read-only. Plain EXPLAIN of a write is rejected too (safe direction).
         Statement::Explain { statement, .. } => ensure_stmt_read_only(statement),
-        Statement::ExplainTable { .. } => Ok(()),
-        Statement::ShowColumns { .. }
+        Statement::ExplainTable { .. }
+        | Statement::ShowColumns { .. }
         | Statement::ShowTables { .. }
         | Statement::ShowDatabases { .. }
         | Statement::ShowSchemas { .. }
@@ -123,7 +123,7 @@ fn ensure_setexpr_read_only(body: &sqlparser::ast::SetExpr) -> Result<(), String
     }
 }
 
-fn stmt_kind(stmt: &Statement) -> &'static str {
+const fn stmt_kind(stmt: &Statement) -> &'static str {
     match stmt {
         Statement::Insert { .. } => "INSERT",
         Statement::Update { .. } => "UPDATE",

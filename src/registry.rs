@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::config::{self, Config};
 use crate::source::{Source, SourceInfo};
@@ -18,18 +18,17 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub fn new(cfg: Config, force_readonly: bool) -> Result<Self> {
+    pub fn new(cfg: Config, force_readonly: bool) -> Self {
         let query_timeout = cfg.query_timeout();
         let mut sources = BTreeMap::new();
         for (name, src_cfg) in cfg.sources {
-            let src = Source::new(&name, src_cfg, force_readonly)
-                .with_context(|| format!("source {name:?}"))?;
+            let src = Source::new(&name, src_cfg, force_readonly);
             sources.insert(name, Arc::new(src));
         }
-        Ok(Self {
+        Self {
             sources,
             query_timeout,
-        })
+        }
     }
 
     pub fn get(&self, name: &str) -> Result<&Arc<Source>, String> {
@@ -103,13 +102,16 @@ impl Resolver {
             };
             let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
             let mut cache = self.by_path.lock().await;
-            if let Some(cached) = cache.get(&path)
-                && cached.mtime == mtime
-            {
-                return Ok(Some(cached.registry.clone()));
+            let hit = cache
+                .get(&path)
+                .filter(|cached| cached.mtime == mtime)
+                .map(|cached| Arc::clone(&cached.registry));
+            if let Some(registry) = hit {
+                drop(cache);
+                return Ok(Some(registry));
             }
             let cfg = config::load(&path)?;
-            let registry = Arc::new(Registry::new(cfg, self.force_readonly)?);
+            let registry = Arc::new(Registry::new(cfg, self.force_readonly));
             if let Some(stale) = cache.insert(
                 path,
                 CachedRoot {
@@ -120,6 +122,9 @@ impl Resolver {
                 // Close the replaced registry off the request path.
                 tokio::spawn(async move { stale.registry.close().await });
             }
+            // Held across load+build on purpose: two callers racing on the same
+            // root should not both construct a registry for it.
+            drop(cache);
             return Ok(Some(registry));
         }
         Ok(None)
