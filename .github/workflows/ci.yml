@@ -8,6 +8,19 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded PR runs, but never on master: the nix job's last steps
+# populate the xilo cache, and cancelling that mid-build leaves the dependency
+# layer unpushed — which costs the next run a ~25 min recompile.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts have no cross-run value here and inflate the cached
+  # target dir, which shares a hard 10 GB per-repo cache budget.
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   rust:
     name: Build, lint & test
@@ -50,24 +63,30 @@ jobs:
             experimental-features = nix-command flakes
             extra-substituters = https://nix.stubbe.dev/c/default/default
             extra-trusted-public-keys = default:6uWvXutL9cXjV3lii+Ur5ff+ArQoG4kMBKNXWrIxhHg=
-      - run: nix build .#default --print-build-logs
-      - run: nix flake check
+      # Build the binary and the dependency layer. --accept-flake-config
+      # honors the flake's own substituter (the extra_nix_config above sets the
+      # same one; this silences the untrusted-config warning).
+      - name: Build package + deps layer
+        run: |
+          nix build -L --accept-flake-config --print-out-paths \
+            '.#default' '.#deps' | tee /tmp/outpaths
+      - run: nix flake check --accept-flake-config
 
-      # Push the build closure to the xilo cache so other machines (and future
-      # CI runs) can substitute instead of rebuilding. A failed push is not
-      # swallowed: it would leave every consumer rebuilding from source, so
-      # the step fails the job.
       - name: setup xilo
         if: github.ref == 'refs/heads/master'
         uses: stubbedev/xilo@v1
         with:
           url: https://nix.stubbe.dev
-          cache: default
+          cache: default/default
           token: ${{ secrets.XILO_TOKEN }}
 
+      # Push both paths. The deps layer is a build-time input, absent from the
+      # binary's runtime closure, so pushing the binary alone never carried it —
+      # which is why every run recompiled duckdb's bundled C++ engine (~15 min)
+      # from scratch. A failed push is not swallowed: it would leave every
+      # consumer rebuilding from source while the job still reported green.
       - name: Push to xilo cache
         if: github.ref == 'refs/heads/master'
         run: |
           set -u
-          out="$(nix build .#default --print-out-paths --no-link)"
-          xilo push default "$out"
+          xilo push default/default $(cat /tmp/outpaths)

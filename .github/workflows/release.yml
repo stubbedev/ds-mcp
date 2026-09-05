@@ -28,7 +28,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      # No rust-cache here on purpose. GitHub scopes Actions caches by ref, so
+      # a cache written under refs/tags/v0.3.7 is unreadable from v0.3.8 — this
+      # matrix logged "No cache found" on every release and never once restored.
+      # Saving anyway cost ~2.5 GB per release out of the repo's hard 10 GB
+      # budget, evicting the master caches that the CI job actually hits.
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
