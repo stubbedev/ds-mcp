@@ -120,6 +120,9 @@ pub struct SourceConfig {
     /// Refuse all write tools on this source.
     #[serde(default)]
     pub readonly: bool,
+    /// Redact sensitive column/field values on the way out. `true` turns on
+    /// the default pattern set; the object form overrides patterns and mode.
+    pub pii: Option<Pii>,
     /// Full connection string (engine-native format). Mutually exclusive
     /// with host/port/user/password/database. `uri` is accepted as an alias.
     #[serde(alias = "uri")]
@@ -185,6 +188,110 @@ fn default_ssh_port() -> u16 {
     22
 }
 
+/// Outbound redaction of sensitive values. `"pii": true` is the short form:
+/// the default column patterns below plus every value detector, in `redact`
+/// mode. The object form overrides any part of that. Absent (or `false`)
+/// leaves results untouched.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum Pii {
+    /// `true` = default patterns + all value detectors + redact; `false` = off.
+    Enabled(bool),
+    Rules(PiiRules),
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PiiRules {
+    /// Case-insensitive globs (`*` = any run) matched against the returned
+    /// column/field name, optionally qualified `table.column`. Omitted = the
+    /// default set.
+    pub columns: Option<Vec<String>>,
+    /// Value detectors to run over string values, catching what an innocent
+    /// column name hides: `email`, `credit_card`, `iban`, `ssn`, `phone`,
+    /// `jwt`, `private_key`, `aws_key`. Omitted = all of them; `[]` = column
+    /// names only. An unknown name is a config error.
+    pub values: Option<Vec<String>>,
+    /// What happens to a matching value. Default `redact`.
+    #[serde(default)]
+    pub mode: PiiMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PiiMode {
+    /// Value becomes `"[redacted]"`.
+    #[default]
+    Redact,
+    /// Value becomes a stable `sha256:<prefix>`, so equal values still group
+    /// and join.
+    Hash,
+    /// Column/field is removed from the result entirely.
+    Drop,
+}
+
+/// Applied when `pii` is on but `columns` is omitted. Deliberately broad —
+/// over-redacting a `token_count` is cheaper than leaking an address — and
+/// deliberately not `*name*`, which would swallow `table_name`.
+const DEFAULT_PII_COLUMNS: &[&str] = &[
+    "*password*",
+    "*passwd*",
+    "*secret*",
+    "*token*",
+    "*api_key*",
+    "*apikey*",
+    "*private_key*",
+    "*email*",
+    "*phone*",
+    "*mobile*",
+    "*ssn*",
+    "*social_security*",
+    "*national_id*",
+    "*passport*",
+    "*credit_card*",
+    "*card_number*",
+    "*cvv*",
+    "*iban*",
+    "*date_of_birth*",
+    "dob",
+    "*birth_date*",
+    "*first_name*",
+    "*last_name*",
+    "*full_name*",
+    "*address*",
+];
+
+fn default_pii_columns() -> &'static [String] {
+    static COLUMNS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+        DEFAULT_PII_COLUMNS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
+    });
+    &COLUMNS
+}
+
+/// What a `pii` block resolves to: the column patterns, the enabled value
+/// detectors (None = all of them) and what to do with a match.
+pub type PiiRuleset<'a> = (&'a [String], Option<&'a [String]>, PiiMode);
+
+impl Pii {
+    /// The rules to apply, or None when this source redacts nothing.
+    pub fn resolve(&self) -> Option<PiiRuleset<'_>> {
+        match self {
+            Pii::Enabled(false) => None,
+            Pii::Enabled(true) => Some((default_pii_columns(), None, PiiMode::Redact)),
+            Pii::Rules(r) => Some((
+                match r.columns.as_deref() {
+                    Some(columns) => columns,
+                    None => default_pii_columns(),
+                },
+                r.values.as_deref(),
+                r.mode,
+            )),
+        }
+    }
+}
 impl Config {
     pub fn query_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.query_timeout_seconds.unwrap_or(30))
@@ -373,6 +480,15 @@ fn validate_source(src: &SourceConfig) -> Result<()> {
     if src.ssh.is_some() && src.docker.is_some() {
         bail!("`ssh` and `docker` are mutually exclusive");
     }
+    if let Some(Pii::Rules(rules)) = &src.pii
+        && let Some(values) = &rules.values
+        && let Some(unknown) = values.iter().find(|v| !crate::detect::is_known(v))
+    {
+        bail!(
+            "unknown pii value detector {unknown:?}; known: {}",
+            crate::detect::names().collect::<Vec<_>>().join(", ")
+        );
+    }
     Ok(())
 }
 
@@ -495,6 +611,56 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{e:#}").contains("DS_MCP_TEST_UNSET_VAR"), "{e}");
+    }
+
+    #[test]
+    fn pii_short_and_long_form() {
+        let short = parse(&minimal("mysql", r#","pii":true"#)).unwrap();
+        let (columns, values, mode) = short.sources["s"].pii.as_ref().unwrap().resolve().unwrap();
+        assert_eq!(mode, PiiMode::Redact);
+        assert!(columns.iter().any(|c| c == "*email*"));
+        // None = every value detector.
+        assert!(values.is_none());
+
+        let long = parse(&minimal(
+            "mysql",
+            r#","pii":{"columns":["email"],"values":["iban"],"mode":"hash"}"#,
+        ))
+        .unwrap();
+        let (columns, values, mode) = long.sources["s"].pii.as_ref().unwrap().resolve().unwrap();
+        assert_eq!(columns, ["email".to_string()].as_slice());
+        assert_eq!(values, Some(["iban".to_string()].as_slice()));
+        assert_eq!(mode, PiiMode::Hash);
+
+        // Object form without `columns`/`values` still gets both defaults.
+        let defaulted = parse(&minimal("mysql", r#","pii":{"mode":"drop"}"#)).unwrap();
+        let (columns, values, mode) = defaulted.sources["s"]
+            .pii
+            .as_ref()
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert_eq!(mode, PiiMode::Drop);
+        assert!(columns.len() > 1);
+        assert!(values.is_none());
+
+        // An unknown detector is a config error, not a silent no-op.
+        let e = parse(&minimal("mysql", r#","pii":{"values":["nope"]}"#)).unwrap_err();
+        assert!(
+            format!("{e:#}").contains("unknown pii value detector"),
+            "{e}"
+        );
+
+        // Off is off.
+        let off = parse(&minimal("mysql", r#","pii":false"#)).unwrap();
+        assert!(off.sources["s"].pii.as_ref().unwrap().resolve().is_none());
+        assert!(
+            parse(&minimal("mysql", "")).unwrap().sources["s"]
+                .pii
+                .is_none()
+        );
+
+        assert!(parse(&minimal("mysql", r#","pii":{"mode":"nonsense"}"#)).is_err());
     }
 
     #[test]

@@ -87,6 +87,17 @@
           "type": "boolean",
           "default": false
         },
+        "pii": {
+          "description": "Redact sensitive column/field values on the way out. `true` turns on\nthe default pattern set; the object form overrides patterns and mode.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Pii"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "dsn": {
           "description": "Full connection string (engine-native format). Mutually exclusive\nwith host/port/user/password/database. `uri` is accepted as an alias.",
           "type": [
@@ -202,6 +213,67 @@
         "elasticsearch",
         "opensearch",
         "qdrant"
+      ]
+    },
+    "Pii": {
+      "description": "Outbound redaction of sensitive values. `\"pii\": true` is the short form:\nthe default column patterns below plus every value detector, in `redact`\nmode. The object form overrides any part of that. Absent (or `false`)\nleaves results untouched.",
+      "anyOf": [
+        {
+          "description": "`true` = default patterns + all value detectors + redact; `false` = off.",
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/PiiRules"
+        }
+      ]
+    },
+    "PiiRules": {
+      "type": "object",
+      "properties": {
+        "columns": {
+          "description": "Case-insensitive globs (`*` = any run) matched against the returned\ncolumn/field name, optionally qualified `table.column`. Omitted = the\ndefault set.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "values": {
+          "description": "Value detectors to run over string values, catching what an innocent\ncolumn name hides: `email`, `credit_card`, `iban`, `ssn`, `phone`,\n`jwt`, `private_key`, `aws_key`. Omitted = all of them; `[]` = column\nnames only. An unknown name is a config error.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "mode": {
+          "description": "What happens to a matching value. Default `redact`.",
+          "$ref": "#/$defs/PiiMode"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PiiMode": {
+      "oneOf": [
+        {
+          "description": "Value becomes `\"[redacted]\"`.",
+          "type": "string",
+          "const": "redact"
+        },
+        {
+          "description": "Value becomes a stable `sha256:<prefix>`, so equal values still group\nand join.",
+          "type": "string",
+          "const": "hash"
+        },
+        {
+          "description": "Column/field is removed from the result entirely.",
+          "type": "string",
+          "const": "drop"
+        }
       ]
     },
     "SshConfig": {

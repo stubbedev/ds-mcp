@@ -24,6 +24,7 @@
       "password": "${ANALYTICS_DB_PASSWORD}",
       "database": "analytics",
       "readonly": true,
+      "pii": true,
       "ssh": {
         "host": "bastion.example.com",
         "user": "deploy",
@@ -47,6 +48,7 @@
       "user": "postgres",
       "password": "${COMPOSE_DB_PASSWORD}",
       "database": "app",
+      "pii": { "columns": ["*email*", "users.address_*"], "values": ["credit_card", "iban"], "mode": "hash" },
       "docker": { "container": "myapp-postgres-1" }
     },
     "cache": {

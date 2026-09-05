@@ -1,5 +1,7 @@
 mod config;
+mod detect;
 mod http;
+mod pii;
 mod registry;
 mod source;
 mod sqlguard;

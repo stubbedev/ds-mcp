@@ -42,19 +42,29 @@ impl Source {
         }
     }
 
+    pub fn config(&self) -> &SourceConfig {
+        match self {
+            Source::Sql(s) => s.config(),
+            Source::Mongo(s) => s.config(),
+            Source::Redis(s) => s.config(),
+            Source::Rest(s) => s.config(),
+        }
+    }
+
+    /// This source's outbound redaction rules, if any.
+    pub fn pii(&self) -> Option<&crate::config::Pii> {
+        self.config().pii.as_ref()
+    }
+
     pub fn info(&self, name: &str) -> SourceInfo {
-        let (engine, cfg, readonly) = match self {
-            Source::Sql(s) => (s.engine(), s.config(), s.readonly()),
-            Source::Mongo(s) => (s.engine(), s.config(), s.readonly()),
-            Source::Redis(s) => (s.engine(), s.config(), s.readonly()),
-            Source::Rest(s) => (s.engine(), s.config(), s.readonly()),
-        };
+        let cfg = self.config();
         SourceInfo {
             name: name.to_string(),
-            engine: engine.name(),
+            engine: cfg.engine.name(),
             description: cfg.description.clone(),
-            readonly,
+            readonly: self.readonly(),
             remote: cfg.ssh.is_some(),
+            pii: crate::pii::Filter::new(self.pii(), &[]).is_some(),
         }
     }
 
@@ -88,11 +98,14 @@ impl Source {
         use serde_json::json;
         match self {
             Source::Sql(s) => Ok(match table {
-                Some(t) => json!({
-                    "engine": s.engine().name(),
-                    "table": t,
-                    "columns": s.query(&s.describe_table_sql(t, database), 500).await?,
-                }),
+                Some(t) => {
+                    let mut columns = s.query(&s.describe_table_sql(t, database), 500).await?;
+                    let tables = vec![t.to_string()];
+                    if let Some(filter) = crate::pii::Filter::new(self.pii(), &tables) {
+                        filter.mark_described_columns(&mut columns);
+                    }
+                    json!({ "engine": s.engine().name(), "table": t, "columns": columns })
+                }
                 None => json!({
                     "engine": s.engine().name(),
                     "tables": s.query(&s.list_tables_sql(database), 1000).await?,
@@ -154,6 +167,9 @@ pub struct SourceInfo {
     pub description: Option<String>,
     pub readonly: bool,
     pub remote: bool,
+    /// Sensitive column/field values are redacted on the way out of this
+    /// source; querying them again will not reveal more.
+    pub pii: bool,
 }
 
 /// Tabular query result. `truncated` is set when more rows existed than the

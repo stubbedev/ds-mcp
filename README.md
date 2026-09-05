@@ -41,8 +41,8 @@ generated [config.schema.json](config.schema.json).
 Per source: `engine` (`mysql` | `mariadb` | `postgres` | `sqlite` | `duckdb` |
 `mssql` | `clickhouse` | `redis` | `valkey` | `mongodb` | `elasticsearch` |
 `opensearch` | `qdrant`), discrete `host`/`port`/`user`/`password`/`database`
-fields or a full `dsn` (alias `uri`), `readonly`, a `description` the model
-uses to pick the right source, `path` for sqlite/duckdb files,
+fields or a full `dsn` (alias `uri`), `readonly`, `pii`, a `description` the
+model uses to pick the right source, `path` for sqlite/duckdb files,
 `default_database` for mongo, and `api_key` for elasticsearch/opensearch/qdrant. Everything defaults sanely: a bare `{"engine": "postgres"}` connects
 to localhost on the default port. In per-repo `.ds-mcp.json` files, relative
 paths (`path`, ssh key files) resolve against the config file's directory.
@@ -145,6 +145,80 @@ read-only, postgres sets `default_transaction_read_only`, clickhouse sets
 `readonly=2` — so even a side-effecting function the parser can't see is
 refused. mysql/mariadb/mssql have no equivalent per-session switch here; for a
 hard guarantee on those, point the source at a read-only database user.
+
+### Redacting sensitive columns
+
+`readonly` protects the database from the model; `pii` protects the data
+subjects from the client. It redacts matching column/field values on the way
+out, before they reach the transcript and whatever the client logs or ships
+upstream:
+
+```json
+"prod": { "engine": "postgres", "readonly": true, "pii": true }
+```
+
+`"pii": true` is the short form, and it turns on both halves of the filter.
+
+**Column names.** A built-in glob set covering the obvious ones —
+`*password*`, `*secret*`, `*token*`, `*api_key*`, `*email*`, `*phone*`,
+`*ssn*`, `*credit_card*`, `*iban*`, `*address*`, `*first_name*`,
+`*date_of_birth*`, ... — each matching value replaced with `"[redacted]"`.
+
+**Values.** Column names only catch the columns someone named honestly. A
+`note`, a `payload`, a Redis string or a Mongo document with invented keys
+gets scanned for values that are self-evidently sensitive whatever the field
+is called, and only the matched span is masked:
+
+| detector | matches | checked by |
+| --- | --- | --- |
+| `email` | `alex@example.com` | — |
+| `credit_card` | contiguous, `4-4-4-4`, Amex `4-6-5` | Luhn |
+| `iban` | `DE89 3704 0044 0532 0130 00` | ISO 13616 mod-97 |
+| `ssn` | `219-09-9999` (separators required) | SSA area/group/serial blocks |
+| `phone` | E.164 only, `+45 12 34 56 78` | length + country code |
+| `jwt` | `eyJ...` | — |
+| `private_key` | `-----BEGIN … PRIVATE KEY-----` | — |
+| `aws_key` | `AKIA…`/`ASIA…`/`AIDA…`/`AROA…` | — |
+
+Every format with a check digit is verified rather than matched by shape, and
+the shape-only patterns are kept narrow, because a false positive here quietly
+destroys real data on every query: a bare run of digits, a UUID, a timestamp,
+a local phone number and a version string are all left alone.
+
+The object form overrides any part of that:
+
+```json
+"prod": {
+  "engine": "postgres",
+  "readonly": true,
+  "pii": { "columns": ["email", "*_ssn", "users.address_*"],
+           "values": ["credit_card", "iban"],
+           "mode": "hash" }
+}
+```
+
+`columns` are case-insensitive globs (`*` = any run) matched against the
+returned column/field name, optionally qualified `table.column` — a qualified
+pattern only fires when the payload names that relation (parsed out of the SQL,
+the Mongo command's collection, or the REST path). `values` selects detectors
+by name; `[]` turns value scanning off and leaves the column globs. Omitting
+either keeps its default. `mode` is `redact` (default), `hash` (a stable
+`sha256:` prefix, so equal values still group and join) or `drop` (the
+column/field disappears from the result). NULL stays NULL in every mode; a
+value detected *inside* a longer string is redacted or hashed in place, since
+`drop` cannot remove half a sentence.
+
+The filter runs on every result of every tool, for every engine — tabular rows
+by column position, documents by field name at any depth (including JSON/JSONB
+cells inside a SQL result), and string values everywhere. `list_sources`
+reports `pii: true`, and `schema` with a `table` adds a `pii` column to the
+described columns, so the model knows which fields come back masked instead of
+re-querying to find out.
+
+Two deliberate limits, both visible in the results rather than hidden: it
+filters on the way out only, so a `WHERE email = '...'` predicate the model
+wrote blind still works, and a server-side aggregate over a redacted column
+(`COUNT(DISTINCT email)`) is computed by the engine and comes back untouched.
 
 Reads are capped at `limit` rows/documents (default 1000) with a
 `truncated`/`has_more` flag; paginate with LIMIT/OFFSET (SQL) or skip/limit

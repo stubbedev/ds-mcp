@@ -10,7 +10,7 @@ use mongodb::{Client, Collection, Database, IndexModel};
 use serde_json::Value;
 use tokio::sync::OnceCell;
 
-use crate::config::{EngineKind, SourceConfig};
+use crate::config::SourceConfig;
 
 pub struct MongoSource {
     name: String,
@@ -101,10 +101,6 @@ impl MongoSource {
             client: OnceCell::new(),
             tunnel: OnceCell::new(),
         }
-    }
-
-    pub fn engine(&self) -> EngineKind {
-        self.cfg.engine
     }
 
     pub fn config(&self) -> &SourceConfig {

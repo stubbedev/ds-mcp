@@ -249,3 +249,125 @@ fn sqlite_end_to_end() {
         "{text}"
     );
 }
+
+/// PII redaction is applied to real tool output, on the way out of the
+/// server — including a qualified `table.column` pattern, which needs the
+/// relation parsed out of the SQL.
+#[test]
+fn pii_redaction_end_to_end() {
+    let dir = std::env::temp_dir().join(format!("ds-mcp-e2e-pii-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("pii.db");
+    std::fs::write(&db, b"").unwrap();
+    let db = db.to_str().unwrap();
+
+    let config = json!({
+        "sources": {
+            "plain": {"engine": "sqlite", "path": db},
+            "short": {"engine": "sqlite", "path": db, "pii": true},
+            // Column patterns in isolation: value detectors off.
+            "qualified": {"engine": "sqlite", "path": db,
+                          "pii": {"columns": ["users.note"], "values": [], "mode": "drop"}}
+        }
+    })
+    .to_string();
+
+    let select = "SELECT id, email, note FROM users";
+    let responses = run_session(
+        &config,
+        &[
+            call(
+                1,
+                "execute",
+                json!({"source": "plain",
+                "query": "CREATE TABLE users(id INTEGER, email TEXT, note TEXT)"}),
+            ),
+            call(
+                2,
+                "execute",
+                json!({"source": "plain",
+                "query": "INSERT INTO users VALUES (1, 'a@b.co', 'hi'), (2, NULL, 'call +45 12 34 56 78 or z@y.co')"}),
+            ),
+            call(3, "query", json!({"source": "plain", "query": select})),
+            call(4, "query", json!({"source": "short", "query": select})),
+            call(5, "query", json!({"source": "qualified", "query": select})),
+            call(
+                6,
+                "query",
+                json!({"source": "qualified", "query": "SELECT note FROM (SELECT note FROM users) x"}),
+            ),
+            call(7, "list_sources", json!({})),
+            call(8, "schema", json!({"source": "short", "table": "users"})),
+        ],
+    );
+
+    // No `pii` block: values come through untouched.
+    let (text, is_error) = tool_result(&responses, 3);
+    assert!(!is_error, "select failed: {text}");
+    let rs: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(rs["rows"][0][1], json!("a@b.co"), "{text}");
+
+    // `"pii": true`: the default patterns catch `email`; NULL stays NULL and
+    // the other columns are untouched.
+    let (text, _) = tool_result(&responses, 4);
+    let rs: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(rs["rows"][0][1], json!("[redacted]"), "{text}");
+    assert_eq!(rs["rows"][1][1], json!(null), "{text}");
+    assert_eq!(rs["rows"][0][0], json!(1), "{text}");
+    assert_eq!(rs["rows"][0][2], json!("hi"), "{text}");
+
+    // Qualified pattern + drop mode: `note` disappears, `email` (not in this
+    // source's pattern list) stays.
+    let (text, _) = tool_result(&responses, 5);
+    let rs: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(rs["columns"], json!(["id", "email"]), "{text}");
+    assert_eq!(rs["rows"][0], json!([1, "a@b.co"]), "{text}");
+
+    // The relation is found through a subquery too.
+    let (text, _) = tool_result(&responses, 6);
+    let rs: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(rs["columns"], json!([]), "{text}");
+
+    // list_sources tells the model which sources redact.
+    let (text, _) = tool_result(&responses, 7);
+    let listed: Value = serde_json::from_str(&text).unwrap();
+    let flags: Vec<(&str, bool)> = listed["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["name"].as_str().unwrap(),
+                s["pii"].as_bool().unwrap_or(false),
+            )
+        })
+        .collect();
+    assert!(flags.contains(&("plain", false)), "{text}");
+    assert!(flags.contains(&("short", true)), "{text}");
+
+    // Value detectors reach a column no pattern names: `note` is innocent, its
+    // contents are not, and only the detected spans are masked.
+    let (text, _) = tool_result(&responses, 4);
+    let rs: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        rs["rows"][1][2],
+        json!("call [redacted] or [redacted]"),
+        "{text}"
+    );
+
+    // schema(table) says up front which columns come back masked.
+    let (text, _) = tool_result(&responses, 8);
+    let described: Value = serde_json::from_str(&text).unwrap();
+    let cols = &described["columns"];
+    let headers = cols["columns"].as_array().unwrap();
+    let name_at = headers
+        .iter()
+        .position(|c| c == "name")
+        .expect("sqlite describe has a `name` column");
+    let pii_at = headers.len() - 1;
+    assert_eq!(headers[pii_at], json!("pii"), "{text}");
+    for row in cols["rows"].as_array().unwrap() {
+        let flagged = row[pii_at] == json!(true);
+        assert_eq!(flagged, row[name_at] == json!("email"), "{text}");
+    }
+}

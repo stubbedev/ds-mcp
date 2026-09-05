@@ -30,6 +30,24 @@ fn dialect(kind: EngineKind) -> Box<dyn Dialect> {
     }
 }
 
+/// The relations a statement names, for `table.column` PII patterns. Best
+/// effort and unqualified (schema prefixes dropped): a statement that will not
+/// parse yields none, which only ever means *less* qualified matching, never a
+/// wrong table.
+pub fn relations(kind: EngineKind, sql: &str) -> Vec<String> {
+    let Ok(statements) = Parser::parse_sql(dialect(kind).as_ref(), sql) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let _: std::ops::ControlFlow<()> = sqlparser::ast::visit_relations(&statements, |name| {
+        if let Some(ident) = name.0.last().and_then(|part| part.as_ident()) {
+            out.push(ident.value.clone());
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    out
+}
+
 pub fn ensure_read_only(kind: EngineKind, sql: &str) -> Result<(), String> {
     let statements = Parser::parse_sql(dialect(kind).as_ref(), sql)
         .map_err(|e| format!("query is not parseable as read-only SQL ({e}); use execute on a writable source if this is intentional"))?;
@@ -200,6 +218,18 @@ mod tests {
     fn rejects_stacked_statements() {
         assert!(ensure_read_only(MySql, "SELECT 1; DROP TABLE t").is_err());
         assert!(ensure_read_only(MySql, "SELECT 1; SELECT 2").is_err());
+    }
+
+    #[test]
+    fn relations_names_every_table_touched() {
+        let mut r = relations(
+            Postgres,
+            "SELECT u.email FROM public.users u JOIN orders o ON o.uid = u.id",
+        );
+        r.sort();
+        assert_eq!(r, vec!["orders".to_string(), "users".to_string()]);
+        // Unparseable yields none rather than a wrong table.
+        assert!(relations(MySql, "FLUSH PRIVILEGES WAT").is_empty());
     }
 
     #[test]

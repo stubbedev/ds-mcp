@@ -23,6 +23,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::pii::Filter;
 use crate::registry::{Registry, Resolver};
 use crate::source::Source;
 
@@ -39,14 +40,16 @@ pub struct DsServer {
 /// that parse it.
 fn ok_json<T: serde::Serialize>(value: &T) -> CallToolResult {
     match serde_json::to_value(value) {
-        Ok(v) => {
-            let text = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
-            let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
-            result.structured_content = Some(v);
-            result
-        }
+        Ok(v) => ok_value(v),
         Err(e) => err(format!("serialize result: {e}")),
     }
+}
+
+fn ok_value(v: Value) -> CallToolResult {
+    let text = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+    let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+    result.structured_content = Some(v);
+    result
 }
 
 fn err(msg: impl Into<String>) -> CallToolResult {
@@ -197,17 +200,37 @@ impl DsServer {
     }
 
     /// Run a source future under the query timeout, rendering any error as a
-    /// tool result.
+    /// tool result. Every result the engine hands back passes through the
+    /// source's PII filter here — one choke point, so no engine can grow a
+    /// path that skips it.
     async fn run<T: serde::Serialize>(
         &self,
         timeout: Duration,
+        pii: Option<Filter<'_>>,
         fut: impl Future<Output = anyhow::Result<T>>,
     ) -> CallToolResult {
         match tokio::time::timeout(timeout, fut).await {
             Err(_) => err(format!("timed out after {}s", timeout.as_secs())),
             Ok(Err(e)) => err(format!("{e:#}")),
-            Ok(Ok(v)) => ok_json(&v),
+            Ok(Ok(v)) => match serde_json::to_value(&v) {
+                Ok(mut json) => {
+                    if let Some(filter) = pii {
+                        filter.apply(&mut json);
+                    }
+                    ok_value(json)
+                }
+                Err(e) => err(format!("serialize result: {e}")),
+            },
         }
+    }
+}
+
+/// The relations a payload touches, so `table.column` patterns have a table to
+/// match against. Only worth computing when the source actually redacts.
+fn touched_tables(src: &Source, sql: &str) -> Vec<String> {
+    match src {
+        Source::Sql(s) if src.pii().is_some() => crate::sqlguard::relations(s.engine(), sql),
+        _ => Vec::new(),
     }
 }
 
@@ -293,6 +316,29 @@ fn as_rest_request(v: Value) -> Result<(String, String, Option<Value>), CallTool
     Ok((method, path, body))
 }
 
+/// The collection a Mongo command names: the first key's value, which is how
+/// every collection command is shaped (`{"find": "widgets", ...}`).
+fn mongo_collection(cmd: &bson::Document) -> Vec<String> {
+    cmd.iter()
+        .next()
+        .and_then(|(_, v)| v.as_str())
+        .map(|c| vec![c.to_string()])
+        .unwrap_or_default()
+}
+
+/// The index/collection a REST path addresses: its first segment, or the
+/// second for Qdrant's `/collections/<name>/...`.
+fn rest_container(path: &str) -> Vec<String> {
+    let mut segments = path.trim_start_matches('/').split('/');
+    let name = match segments.next() {
+        Some("collections") => segments.next(),
+        other => other,
+    };
+    name.filter(|s| !s.is_empty() && !s.starts_with('_'))
+        .map(|s| vec![s.to_string()])
+        .unwrap_or_default()
+}
+
 /// A Mongo payload must be a command document.
 fn as_mongo_command(v: Value) -> Result<bson::Document, CallToolResult> {
     crate::source::mongo::to_doc(coerce_structured(v)).map_err(|e| {
@@ -326,7 +372,7 @@ impl DsServer {
     ) -> CallToolResult {
         let (src, timeout) = src!(self, ctx, args.source);
         let start = std::time::Instant::now();
-        self.run(timeout, async move {
+        self.run(timeout, None, async move {
             match src.as_ref() {
                 Source::Sql(s) => {
                     s.query("SELECT 1", 1).await?;
@@ -353,8 +399,10 @@ impl DsServer {
         ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let (src, timeout) = src!(self, ctx, args.source);
+        let tables: Vec<String> = args.table.iter().cloned().collect();
         self.run(
             timeout,
+            Filter::new(src.pii(), &tables),
             src.schema(args.database.as_deref(), args.table.as_deref()),
         )
         .await
@@ -380,7 +428,13 @@ impl DsServer {
                 if let Err(e) = crate::sqlguard::ensure_read_only(s.engine(), &sql) {
                     return err(e);
                 }
-                self.run(timeout, s.query(&sql, limit)).await
+                let tables = touched_tables(&src, &sql);
+                self.run(
+                    timeout,
+                    Filter::new(src.pii(), &tables),
+                    s.query(&sql, limit),
+                )
+                .await
             }
             Source::Mongo(m) => {
                 let cmd = match as_mongo_command(args.query) {
@@ -396,8 +450,10 @@ impl DsServer {
                     }
                     Err(e) => return err(format!("{e:#}")),
                 }
+                let tables = mongo_collection(&cmd);
                 self.run(
                     timeout,
+                    Filter::new(src.pii(), &tables),
                     m.run_command(args.database.as_deref(), cmd, Some(limit)),
                 )
                 .await
@@ -414,7 +470,8 @@ impl DsServer {
                     return err(format!("{first} is not a read command; use execute"));
                 }
                 let db = args.database;
-                self.run(timeout, async move {
+                let pii = Filter::new(src.pii(), &[]);
+                self.run(timeout, pii, async move {
                     Ok(serde_json::json!({"result": r.command(&parts, db.as_deref()).await?}))
                 })
                 .await
@@ -427,7 +484,13 @@ impl DsServer {
                 if !crate::source::rest::is_read_request(r.engine(), &method, &path) {
                     return err(format!("{method} {path} is not a read; use execute"));
                 }
-                self.run(timeout, r.request(&method, &path, body)).await
+                let tables = rest_container(&path);
+                self.run(
+                    timeout,
+                    Filter::new(src.pii(), &tables),
+                    r.request(&method, &path, body),
+                )
+                .await
             }
         }
     }
@@ -451,15 +514,22 @@ impl DsServer {
                     Ok(v) => v,
                     Err(e) => return e,
                 };
-                self.run(timeout, s.exec(&sql)).await
+                let tables = touched_tables(&src, &sql);
+                self.run(timeout, Filter::new(src.pii(), &tables), s.exec(&sql))
+                    .await
             }
             Source::Mongo(m) => {
                 let cmd = match as_mongo_command(args.query) {
                     Ok(v) => v,
                     Err(e) => return e,
                 };
-                self.run(timeout, m.run_command(args.database.as_deref(), cmd, None))
-                    .await
+                let tables = mongo_collection(&cmd);
+                self.run(
+                    timeout,
+                    Filter::new(src.pii(), &tables),
+                    m.run_command(args.database.as_deref(), cmd, None),
+                )
+                .await
             }
             Source::Redis(r) => {
                 let parts = match as_redis_parts(args.query) {
@@ -470,7 +540,8 @@ impl DsServer {
                     return err("command is empty");
                 }
                 let db = args.database;
-                self.run(timeout, async move {
+                let pii = Filter::new(src.pii(), &[]);
+                self.run(timeout, pii, async move {
                     Ok(serde_json::json!({"result": r.command(&parts, db.as_deref()).await?}))
                 })
                 .await
@@ -480,7 +551,13 @@ impl DsServer {
                     Ok(v) => v,
                     Err(e) => return e,
                 };
-                self.run(timeout, r.request(&method, &path, body)).await
+                let tables = rest_container(&path);
+                self.run(
+                    timeout,
+                    Filter::new(src.pii(), &tables),
+                    r.request(&method, &path, body),
+                )
+                .await
             }
         }
     }
@@ -545,10 +622,13 @@ impl ServerHandler for DsServer {
             .get(name)
             .map(Arc::clone)
             .map_err(|e| ErrorData::invalid_params(e, None))?;
-        let schema = tokio::time::timeout(reg.query_timeout, src.schema(None, None))
+        let mut schema = tokio::time::timeout(reg.query_timeout, src.schema(None, None))
             .await
             .map_err(|_| ErrorData::internal_error("schema read timed out", None))?
             .map_err(|e| ErrorData::internal_error(format!("{e:#}"), None))?;
+        if let Some(filter) = Filter::new(src.pii(), &[]) {
+            filter.apply(&mut schema);
+        }
         let text = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string());
         // rmcp 3 lets a handler answer with either the finished result or an
         // MRTR input request (SEP-2322); this one never needs client input.
