@@ -90,23 +90,36 @@ async fn serve(
     http_addr: Option<String>,
     read_only: bool,
 ) -> Result<()> {
-    // An explicit --config that fails to load is fatal; a missing global one
-    // is not.
-    let path = config_path
-        .clone()
-        .or_else(|| config::default_path_global().filter(|p| p.exists()));
-    let cfg = if let Some(p) = &path {
-        Some(config::load(p)?)
-    } else {
+    // The .mcpb bundle configures the server through the environment: Claude
+    // Desktop can set env vars but cannot write a config file.
+    let config_path = config_path.or_else(config::path_from_env);
+    let read_only = read_only || config::read_only_from_env()?;
+    let env_cfg = config::from_env()?;
+
+    let mut cfg = match &config_path {
+        // An explicit --config that fails to load is fatal.
+        Some(p) => Some(config::load(p)?),
+        None => config::default_path_global()
+            .filter(|p| p.exists())
+            .map(|p| config::load(&p))
+            .transpose()?,
+    };
+    match (&mut cfg, env_cfg) {
+        // DS_MCP_* sources join a file config and win on name clashes.
+        (Some(file), Some(env)) => {
+            file.sources.extend(env.sources);
+            file.query_timeout_seconds = file.query_timeout_seconds.or(env.query_timeout_seconds);
+        }
+        (None, Some(env)) => cfg = Some(env),
         // Roots-only mode: clients supply sources via a .ds-mcp.json at their
         // workspace root.
-        tracing::warn!(
+        (None, None) => tracing::warn!(
             "no global config found; running in roots-only mode \
              (clients need a {} in a workspace root)",
             config::ROOT_CONFIG_NAME
-        );
-        None
-    };
+        ),
+        (Some(_), None) => {}
+    }
     let http_cfg = cfg.as_ref().map(|c| c.http.clone()).unwrap_or_default();
     let global = cfg.map(|c| Arc::new(registry::Registry::new(c, read_only)));
     let resolver = Arc::new(registry::Resolver::new(global, read_only));

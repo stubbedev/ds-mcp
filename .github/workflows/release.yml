@@ -70,6 +70,36 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - uses: actions/checkout@v7
+        with:
+          path: repo
+
+      # MCP Bundles: one-click install in Claude Desktop (Settings ->
+      # Extensions). Each bundle is manifest.json + that platform's binary, so
+      # the desktop app needs no client JSON and no PATH fixing.
+      - name: Pack .mcpb bundles
+        run: |
+          set -euo pipefail
+          # Unpack into a scratch dir: dist/ is what gets attached to the
+          # release, and bare binaries do not belong there.
+          mkdir -p bin
+          for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+                   aarch64-apple-darwin x86_64-apple-darwin; do
+            tar -xzf "dist/ds-mcp_${GITHUB_REF_NAME}_${t}.tar.gz" -O > "bin/${t}"
+          done
+          unzip -p "dist/ds-mcp_${GITHUB_REF_NAME}_x86_64-pc-windows-msvc.zip" \
+            ds-mcp.exe > bin/x86_64-pc-windows-msvc.exe
+          pack() {
+            repo/packaging/mcpb/pack.sh "bin/$1" "$2" \
+              "dist/ds-mcp_${GITHUB_REF_NAME}_$1.mcpb"
+          }
+          pack x86_64-unknown-linux-gnu   linux
+          pack aarch64-unknown-linux-gnu  linux
+          pack aarch64-apple-darwin       darwin
+          pack x86_64-apple-darwin        darwin
+          repo/packaging/mcpb/pack.sh bin/x86_64-pc-windows-msvc.exe win32 \
+            "dist/ds-mcp_${GITHUB_REF_NAME}_x86_64-pc-windows-msvc.mcpb"
+
       - name: Checksums
         run: |
           cd dist

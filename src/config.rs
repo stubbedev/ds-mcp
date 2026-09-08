@@ -325,6 +325,238 @@ pub fn load(path: &Path) -> Result<Config> {
     Ok(cfg)
 }
 
+/// Build a config from `DS_MCP_*` environment variables. This is how the
+/// Claude Desktop `.mcpb` bundle passes its `user_config` through: the desktop
+/// app can set environment variables but cannot write a config file. Returns
+/// `None` when nothing relevant is set. Blank values count as unset — clients
+/// substitute empty strings for optional fields the user left alone.
+pub fn from_env() -> Result<Option<Config>> {
+    let mut sources = serde_json::Map::new();
+
+    // Escape hatch for several sources at once: the `sources` object verbatim.
+    if let Some(raw) = env_str("DS_MCP_SOURCES") {
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).context("DS_MCP_SOURCES is not valid JSON")?;
+        let serde_json::Value::Object(map) = value else {
+            bail!("DS_MCP_SOURCES must be a JSON object of name -> source");
+        };
+        sources.extend(map);
+    }
+    // The unnumbered slot, then DS_MCP_2_*, DS_MCP_3_*, … Later slots win a
+    // name clash, as does any slot over DS_MCP_SOURCES.
+    for slot in std::iter::once(None).chain(env_slots().into_iter().map(Some)) {
+        let prefix = slot.map_or_else(|| "DS_MCP_".to_string(), |n| format!("DS_MCP_{n}_"));
+        if let Some(src) = env_source(&prefix)? {
+            let name = env_str(&format!("{prefix}SOURCE_NAME"))
+                .unwrap_or_else(|| slot.map_or_else(|| "db".to_string(), |n| format!("db{n}")));
+            sources.insert(name, src);
+        }
+    }
+    if sources.is_empty() {
+        return Ok(None);
+    }
+
+    let mut root = serde_json::Map::new();
+    root.insert("sources".into(), serde_json::Value::Object(sources));
+    if let Some(n) = env_num("DS_MCP_QUERY_TIMEOUT_SECONDS")? {
+        root.insert("query_timeout_seconds".into(), n.into());
+    }
+
+    let ctx = "DS_MCP_* environment configuration";
+    let mut cfg: Config = serde_json::from_value(serde_json::Value::Object(root)).context(ctx)?;
+    expand(&mut cfg, &BTreeMap::new()).context(ctx)?;
+    validate(&cfg).context(ctx)?;
+    Ok(Some(cfg))
+}
+
+/// `DS_MCP_CONFIG` — config file path used when no `--config` was passed.
+pub fn path_from_env() -> Option<PathBuf> {
+    env_str("DS_MCP_CONFIG").map(PathBuf::from)
+}
+
+/// `DS_MCP_READ_ONLY` — the bundle's global read-only switch, same as
+/// `--read-only`.
+pub fn read_only_from_env() -> Result<bool> {
+    Ok(env_bool("DS_MCP_READ_ONLY")?.unwrap_or(false))
+}
+
+/// Numbered slots present in the environment, found by their `ENGINE`
+/// variable. There is no upper bound here — the `.mcpb` form ships a handful
+/// of slots, but any client can set `DS_MCP_9_ENGINE` and get a ninth source.
+fn env_slots() -> Vec<u32> {
+    let mut slots: Vec<u32> = std::env::vars_os()
+        .filter_map(|(key, _)| key.into_string().ok())
+        .filter_map(|key| {
+            let n = key.strip_prefix("DS_MCP_")?.strip_suffix("_ENGINE")?;
+            n.parse::<u32>().ok()
+        })
+        .collect();
+    slots.sort_unstable();
+    slots.dedup();
+    slots
+}
+
+/// One source assembled from the flat `<prefix>*` variables (`DS_MCP_` for the
+/// unnumbered slot, `DS_MCP_2_` for the second, …). `ENGINE` is the switch:
+/// without it there is nothing to connect to.
+fn env_source(prefix: &str) -> Result<Option<serde_json::Value>> {
+    let var = |field: &str| format!("{prefix}{field}");
+    let Some(engine) = env_str(&var("ENGINE")) else {
+        return Ok(None);
+    };
+    let mut src = serde_json::Map::new();
+    src.insert("engine".into(), engine.to_ascii_lowercase().into());
+    put_strings(
+        &mut src,
+        prefix,
+        &[
+            ("DESCRIPTION", "description"),
+            ("DSN", "dsn"),
+            ("HOST", "host"),
+            ("USER", "user"),
+            ("PASSWORD", "password"),
+            ("API_KEY", "api_key"),
+            ("DATABASE", "database"),
+            ("PATH", "path"),
+            ("DEFAULT_DATABASE", "default_database"),
+        ],
+    );
+    if let Some(n) = env_num(&var("PORT"))? {
+        src.insert("port".into(), n.into());
+    }
+    if let Some(n) = env_num(&var("CONNECT_TIMEOUT_SECONDS"))? {
+        src.insert("connect_timeout_seconds".into(), n.into());
+    }
+    if let Some(b) = env_bool(&var("READONLY"))? {
+        src.insert("readonly".into(), b.into());
+    }
+    if let Some(pii) = env_pii(prefix)? {
+        src.insert("pii".into(), pii);
+    }
+
+    if let Some(host) = env_str(&var("SSH_HOST")) {
+        let mut ssh = serde_json::Map::new();
+        ssh.insert("host".into(), host.into());
+        ssh.insert(
+            "user".into(),
+            env_str(&var("SSH_USER"))
+                .with_context(|| format!("{prefix}SSH_HOST is set but {prefix}SSH_USER is not"))?
+                .into(),
+        );
+        put_strings(
+            &mut ssh,
+            prefix,
+            &[
+                ("SSH_PASSWORD", "password"),
+                ("SSH_IDENTITY_FILE", "identity_file"),
+                ("SSH_PASSPHRASE", "passphrase"),
+                ("SSH_KNOWN_HOSTS_FILE", "known_hosts_file"),
+            ],
+        );
+        if let Some(n) = env_num(&var("SSH_PORT"))? {
+            ssh.insert("port".into(), n.into());
+        }
+        if let Some(b) = env_bool(&var("SSH_USE_AGENT"))? {
+            ssh.insert("use_agent".into(), b.into());
+        }
+        if let Some(b) = env_bool(&var("SSH_INSECURE_IGNORE_HOST_KEY"))? {
+            ssh.insert("insecure_ignore_host_key".into(), b.into());
+        }
+        src.insert("ssh".into(), ssh.into());
+    }
+
+    if let Some(container) = env_str(&var("DOCKER_CONTAINER")) {
+        let mut docker = serde_json::Map::new();
+        docker.insert("container".into(), container.into());
+        if let Some(n) = env_num(&var("DOCKER_PORT"))? {
+            docker.insert("port".into(), n.into());
+        }
+        src.insert("docker".into(), docker.into());
+    }
+
+    Ok(Some(src.into()))
+}
+
+/// `<prefix>PII` alone is the `true`/`false` short form; any of the
+/// `PII_COLUMNS` / `PII_VALUES` / `PII_MODE` lists (comma-separated) build the
+/// object form instead.
+fn env_pii(prefix: &str) -> Result<Option<serde_json::Value>> {
+    let columns = env_list(&format!("{prefix}PII_COLUMNS"));
+    let values = env_list(&format!("{prefix}PII_VALUES"));
+    let mode = env_str(&format!("{prefix}PII_MODE"));
+    if columns.is_none() && values.is_none() && mode.is_none() {
+        return Ok(env_bool(&format!("{prefix}PII"))?.map(Into::into));
+    }
+    let mut rules = serde_json::Map::new();
+    if let Some(c) = columns {
+        rules.insert("columns".into(), c.into());
+    }
+    if let Some(v) = values {
+        rules.insert("values".into(), v.into());
+    }
+    if let Some(m) = mode {
+        rules.insert("mode".into(), m.to_ascii_lowercase().into());
+    }
+    Ok(Some(rules.into()))
+}
+
+/// Comma-separated list. An explicit `[]` (the literal string) means "none",
+/// which is how `values` turns value detectors off.
+fn env_list(key: &str) -> Option<Vec<String>> {
+    let raw = env_str(key)?;
+    if raw == "[]" {
+        return Some(Vec::new());
+    }
+    Some(
+        raw.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect(),
+    )
+}
+
+fn put_strings(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    prefix: &str,
+    keys: &[(&str, &str)],
+) {
+    for (var, field) in keys {
+        if let Some(v) = env_str(&format!("{prefix}{var}")) {
+            map.insert((*field).into(), v.into());
+        }
+    }
+}
+
+/// A set-but-blank variable reads as unset: MCP clients fill unanswered
+/// optional fields with an empty string.
+fn env_str(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn env_num(key: &str) -> Result<Option<u64>> {
+    env_str(key)
+        .map(|v| {
+            v.parse::<u64>()
+                .with_context(|| format!("{key}={v:?} is not a number"))
+        })
+        .transpose()
+}
+
+fn env_bool(key: &str) -> Result<Option<bool>> {
+    let Some(v) = env_str(key) else {
+        return Ok(None);
+    };
+    match v.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(Some(true)),
+        "0" | "false" | "no" | "off" => Ok(Some(false)),
+        _ => bail!("{key}={v:?} is not a boolean"),
+    }
+}
+
 /// Read `.env` into a map (best effort — a missing file is fine). Values are
 /// a fallback: process environment variables take precedence.
 fn load_dotenv(path: &Path) -> BTreeMap<String, String> {
@@ -611,6 +843,64 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{e:#}").contains("DS_MCP_TEST_UNSET_VAR"), "{e}");
+    }
+
+    // One test for the whole DS_MCP_* path: the process environment is global,
+    // so splitting it up would race against itself.
+    #[test]
+    fn env_config() {
+        const VARS: [&str; 10] = [
+            "DS_MCP_ENGINE",
+            "DS_MCP_SOURCE_NAME",
+            "DS_MCP_HOST",
+            "DS_MCP_PORT",
+            "DS_MCP_READONLY",
+            "DS_MCP_DATABASE",
+            "DS_MCP_SSH_HOST",
+            "DS_MCP_SSH_USER",
+            "DS_MCP_3_ENGINE",
+            "DS_MCP_3_PATH",
+        ];
+        assert!(from_env().unwrap().is_none(), "nothing set = no config");
+
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::set_var("DS_MCP_ENGINE", "postgres");
+            std::env::set_var("DS_MCP_SOURCE_NAME", "warehouse");
+            std::env::set_var("DS_MCP_HOST", "db.example.com");
+            std::env::set_var("DS_MCP_PORT", "5433");
+            std::env::set_var("DS_MCP_READONLY", "true");
+            // Blank = the user left the field alone in the desktop UI.
+            std::env::set_var("DS_MCP_DATABASE", "");
+            std::env::set_var("DS_MCP_SSH_HOST", "bastion");
+            std::env::set_var("DS_MCP_SSH_USER", "deploy");
+            // A numbered slot: its own source, auto-named db3.
+            std::env::set_var("DS_MCP_3_ENGINE", "sqlite");
+            std::env::set_var("DS_MCP_3_PATH", "/tmp/ds-mcp-slot3.db");
+        }
+        let cfg = from_env().unwrap().unwrap();
+        // SAFETY: test-only env mutation.
+        unsafe {
+            for v in VARS {
+                std::env::remove_var(v);
+            }
+        }
+
+        let src = &cfg.sources["warehouse"];
+        assert_eq!(src.engine, EngineKind::Postgres);
+        assert_eq!(src.host.as_deref(), Some("db.example.com"));
+        assert_eq!(src.port, Some(5433));
+        assert!(src.readonly);
+        assert_eq!(src.database, None);
+        let ssh = src.ssh.as_ref().unwrap();
+        assert_eq!(
+            (ssh.host.as_str(), ssh.user.as_str(), ssh.port),
+            ("bastion", "deploy", 22)
+        );
+
+        let slot3 = &cfg.sources["db3"];
+        assert_eq!(slot3.engine, EngineKind::Sqlite);
+        assert_eq!(slot3.path.as_deref(), Some("/tmp/ds-mcp-slot3.db"));
     }
 
     #[test]

@@ -17,6 +17,12 @@ Prebuilt binaries for linux/macos/windows are attached to
 [GitHub releases](../../releases); an AUR PKGBUILD lives in
 [packaging/aur](packaging/aur).
 
+For Claude Desktop, grab the `.mcpb` bundle for your platform from the same
+release and open it (or Settings → Extensions → Advanced → install from file).
+It carries the binary, so there is no client JSON to edit and no PATH to fix —
+the connection is filled in from the extension's settings form. See
+[Claude Desktop](#claude-desktop-mcpb) below.
+
 ## Configure
 
 Global config lives at `~/.config/ds-mcp/config.json` (or pass `--config`).
@@ -68,6 +74,45 @@ config (real env vars win). So a repo can commit `.ds-mcp.json` with
 `"password": "${DB_PASSWORD}"` and keep the value in a git-ignored `.env`
 beside it. Tunneled mongo sources are forced to `directConnection` — point
 the URI at one reachable host.
+
+### Claude Desktop (.mcpb)
+
+<a id="claude-desktop-mcpb"></a>The `.mcpb` bundle has no config file to edit,
+so the extension's settings form maps onto `DS_MCP_*` environment variables
+instead — every option a config file allows:
+
+| variable | config field |
+|---|---|
+| `DS_MCP_ENGINE` | `engine` — the switch: without it no env source is built |
+| `DS_MCP_SOURCE_NAME` | the source's name (default `db`) |
+| `DS_MCP_DESCRIPTION`, `DS_MCP_READONLY` | `description`, `readonly` |
+| `DS_MCP_DSN`, `DS_MCP_HOST`, `DS_MCP_PORT`, `DS_MCP_USER`, `DS_MCP_PASSWORD`, `DS_MCP_DATABASE` | the connection |
+| `DS_MCP_PATH`, `DS_MCP_API_KEY`, `DS_MCP_DEFAULT_DATABASE`, `DS_MCP_CONNECT_TIMEOUT_SECONDS` | `path`, `api_key`, `default_database`, `connect_timeout_seconds` |
+| `DS_MCP_PII`, `DS_MCP_PII_COLUMNS`, `DS_MCP_PII_VALUES`, `DS_MCP_PII_MODE` | `pii` (bool alone, or the object form once a list is set) |
+| `DS_MCP_SSH_*` | `ssh.host`/`port`/`user`/`password`/`identity_file`/`passphrase`/`use_agent`/`known_hosts_file` |
+| `DS_MCP_DOCKER_CONTAINER`, `DS_MCP_DOCKER_PORT` | `docker` |
+| `DS_MCP_QUERY_TIMEOUT_SECONDS`, `DS_MCP_READ_ONLY` | `query_timeout_seconds`, and `--read-only` for every source |
+| `DS_MCP_CONFIG` | a config file path, same as `--config` |
+| `DS_MCP_SOURCES` | a whole `sources` object as inline JSON |
+
+More than one database: number the slot. `DS_MCP_2_ENGINE`,
+`DS_MCP_2_HOST`, … build a second source (named `db2` unless
+`DS_MCP_2_SOURCE_NAME` says otherwise), `DS_MCP_3_*` a third, and so on with
+no upper bound — every per-source variable above takes a number (the last
+four rows are server-wide and do not). The bundle's form ships
+four numbered slots on top of the first source; past that, use a config file
+or `DS_MCP_SOURCES`. Everything found is merged into one list, and a later
+slot wins a name clash.
+
+Blank counts as unset, so untouched fields fall away. Lists are
+comma-separated (`[]` for an empty one) and booleans take
+`true`/`false`/`1`/`0`. Env sources are merged into a config file's sources
+when both are present, winning on a name clash. None of this is
+Desktop-specific — the same variables work for any client that can set an
+environment.
+
+Build a bundle locally with `just bundle`; the template lives in
+[packaging/mcpb](packaging/mcpb).
 
 ### Per-workspace sources (roots)
 

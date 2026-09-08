@@ -1,0 +1,604 @@
+{
+  "manifest_version": "0.3",
+  "name": "ds-mcp",
+  "display_name": "DataStore",
+  "version": "__VERSION__",
+  "description": "Query MySQL, PostgreSQL, SQLite, DuckDB, SQL Server, ClickHouse, MongoDB, Redis, Elasticsearch and Qdrant through one MCP tool set.",
+  "long_description": "One MCP server for many databases. Five tools — list_sources, ping, schema, query, execute — cover every engine, and the query payload stays engine-native: SQL text for SQL engines, a runCommand document for MongoDB, a command array for Redis/Valkey.\n\nFill in the first connection below and it becomes a named source; the four extra slots add more databases the same way. Anything behind a bastion or inside a Docker container is reachable via the SSH and Docker settings on the first source.\n\nPast those slots there is no limit: point Config file at a ds-mcp config.json, or paste a whole sources object into Extra sources (JSON). Every source found is merged into one list (see https://github.com/stubbedev/ds-mcp#configure).\n\nRead-only and PII redaction are off by default; turn them on for anything pointing at production.",
+  "author": {
+    "name": "stubbedev",
+    "url": "https://github.com/stubbedev"
+  },
+  "icon": "icon.png",
+  "homepage": "https://github.com/stubbedev/ds-mcp",
+  "documentation": "https://github.com/stubbedev/ds-mcp#readme",
+  "support": "https://github.com/stubbedev/ds-mcp/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stubbedev/ds-mcp"
+  },
+  "license": "MIT",
+  "keywords": [
+    "database",
+    "sql",
+    "mysql",
+    "postgres",
+    "sqlite",
+    "duckdb",
+    "mssql",
+    "clickhouse",
+    "mongodb",
+    "redis",
+    "elasticsearch",
+    "qdrant"
+  ],
+  "server": {
+    "type": "binary",
+    "entry_point": "__BIN__",
+    "mcp_config": {
+      "command": "${__dirname}/__BIN__",
+      "args": [
+        "serve"
+      ],
+      "env": {
+        "DS_MCP_CONFIG": "${user_config.config_file}",
+        "DS_MCP_READ_ONLY": "${user_config.read_only_all}",
+        "DS_MCP_QUERY_TIMEOUT_SECONDS": "${user_config.query_timeout_seconds}",
+        "DS_MCP_SOURCE_NAME": "${user_config.source_name}",
+        "DS_MCP_ENGINE": "${user_config.engine}",
+        "DS_MCP_DESCRIPTION": "${user_config.description}",
+        "DS_MCP_DSN": "${user_config.dsn}",
+        "DS_MCP_HOST": "${user_config.host}",
+        "DS_MCP_PORT": "${user_config.port}",
+        "DS_MCP_USER": "${user_config.user}",
+        "DS_MCP_PASSWORD": "${user_config.password}",
+        "DS_MCP_DATABASE": "${user_config.database}",
+        "DS_MCP_PATH": "${user_config.path}",
+        "DS_MCP_API_KEY": "${user_config.api_key}",
+        "DS_MCP_DEFAULT_DATABASE": "${user_config.default_database}",
+        "DS_MCP_READONLY": "${user_config.readonly}",
+        "DS_MCP_CONNECT_TIMEOUT_SECONDS": "${user_config.connect_timeout_seconds}",
+        "DS_MCP_PII": "${user_config.pii}",
+        "DS_MCP_PII_COLUMNS": "${user_config.pii_columns}",
+        "DS_MCP_PII_VALUES": "${user_config.pii_values}",
+        "DS_MCP_PII_MODE": "${user_config.pii_mode}",
+        "DS_MCP_SSH_HOST": "${user_config.ssh_host}",
+        "DS_MCP_SSH_PORT": "${user_config.ssh_port}",
+        "DS_MCP_SSH_USER": "${user_config.ssh_user}",
+        "DS_MCP_SSH_PASSWORD": "${user_config.ssh_password}",
+        "DS_MCP_SSH_IDENTITY_FILE": "${user_config.ssh_identity_file}",
+        "DS_MCP_SSH_PASSPHRASE": "${user_config.ssh_passphrase}",
+        "DS_MCP_SSH_USE_AGENT": "${user_config.ssh_use_agent}",
+        "DS_MCP_SSH_KNOWN_HOSTS_FILE": "${user_config.ssh_known_hosts_file}",
+        "DS_MCP_DOCKER_CONTAINER": "${user_config.docker_container}",
+        "DS_MCP_DOCKER_PORT": "${user_config.docker_port}",
+        "DS_MCP_2_ENGINE": "${user_config.s2_engine}",
+        "DS_MCP_2_SOURCE_NAME": "${user_config.s2_name}",
+        "DS_MCP_2_DESCRIPTION": "${user_config.s2_description}",
+        "DS_MCP_2_HOST": "${user_config.s2_host}",
+        "DS_MCP_2_PORT": "${user_config.s2_port}",
+        "DS_MCP_2_USER": "${user_config.s2_user}",
+        "DS_MCP_2_PASSWORD": "${user_config.s2_password}",
+        "DS_MCP_2_DATABASE": "${user_config.s2_database}",
+        "DS_MCP_2_DSN": "${user_config.s2_dsn}",
+        "DS_MCP_2_PATH": "${user_config.s2_path}",
+        "DS_MCP_2_READONLY": "${user_config.s2_readonly}",
+        "DS_MCP_2_PII": "${user_config.s2_pii}",
+        "DS_MCP_3_ENGINE": "${user_config.s3_engine}",
+        "DS_MCP_3_SOURCE_NAME": "${user_config.s3_name}",
+        "DS_MCP_3_DESCRIPTION": "${user_config.s3_description}",
+        "DS_MCP_3_HOST": "${user_config.s3_host}",
+        "DS_MCP_3_PORT": "${user_config.s3_port}",
+        "DS_MCP_3_USER": "${user_config.s3_user}",
+        "DS_MCP_3_PASSWORD": "${user_config.s3_password}",
+        "DS_MCP_3_DATABASE": "${user_config.s3_database}",
+        "DS_MCP_3_DSN": "${user_config.s3_dsn}",
+        "DS_MCP_3_PATH": "${user_config.s3_path}",
+        "DS_MCP_3_READONLY": "${user_config.s3_readonly}",
+        "DS_MCP_3_PII": "${user_config.s3_pii}",
+        "DS_MCP_4_ENGINE": "${user_config.s4_engine}",
+        "DS_MCP_4_SOURCE_NAME": "${user_config.s4_name}",
+        "DS_MCP_4_DESCRIPTION": "${user_config.s4_description}",
+        "DS_MCP_4_HOST": "${user_config.s4_host}",
+        "DS_MCP_4_PORT": "${user_config.s4_port}",
+        "DS_MCP_4_USER": "${user_config.s4_user}",
+        "DS_MCP_4_PASSWORD": "${user_config.s4_password}",
+        "DS_MCP_4_DATABASE": "${user_config.s4_database}",
+        "DS_MCP_4_DSN": "${user_config.s4_dsn}",
+        "DS_MCP_4_PATH": "${user_config.s4_path}",
+        "DS_MCP_4_READONLY": "${user_config.s4_readonly}",
+        "DS_MCP_4_PII": "${user_config.s4_pii}",
+        "DS_MCP_5_ENGINE": "${user_config.s5_engine}",
+        "DS_MCP_5_SOURCE_NAME": "${user_config.s5_name}",
+        "DS_MCP_5_DESCRIPTION": "${user_config.s5_description}",
+        "DS_MCP_5_HOST": "${user_config.s5_host}",
+        "DS_MCP_5_PORT": "${user_config.s5_port}",
+        "DS_MCP_5_USER": "${user_config.s5_user}",
+        "DS_MCP_5_PASSWORD": "${user_config.s5_password}",
+        "DS_MCP_5_DATABASE": "${user_config.s5_database}",
+        "DS_MCP_5_DSN": "${user_config.s5_dsn}",
+        "DS_MCP_5_PATH": "${user_config.s5_path}",
+        "DS_MCP_5_READONLY": "${user_config.s5_readonly}",
+        "DS_MCP_5_PII": "${user_config.s5_pii}",
+        "DS_MCP_SOURCES": "${user_config.sources_json}"
+      }
+    }
+  },
+  "user_config": {
+    "engine": {
+      "type": "string",
+      "title": "Engine",
+      "description": "mysql, mariadb, postgres, sqlite, duckdb, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant. Leave blank if you only use Config file or Extra sources.",
+      "required": false
+    },
+    "source_name": {
+      "type": "string",
+      "title": "Source name",
+      "description": "What the model calls this database on every tool call. Default: db.",
+      "default": "db",
+      "required": false
+    },
+    "description": {
+      "type": "string",
+      "title": "Description",
+      "description": "Shown by list_sources so the model picks the right database unaided, e.g. \"Production analytics replica, read-only\".",
+      "required": false
+    },
+    "host": {
+      "type": "string",
+      "title": "Host",
+      "description": "Defaults to 127.0.0.1. Leave blank when using a connection string, or for sqlite/duckdb.",
+      "required": false
+    },
+    "port": {
+      "type": "number",
+      "title": "Port",
+      "description": "Defaults to the engine's standard port.",
+      "required": false
+    },
+    "user": {
+      "type": "string",
+      "title": "Username",
+      "required": false
+    },
+    "password": {
+      "type": "string",
+      "title": "Password",
+      "sensitive": true,
+      "required": false
+    },
+    "database": {
+      "type": "string",
+      "title": "Database",
+      "description": "Database (or MongoDB database) to connect to.",
+      "required": false
+    },
+    "dsn": {
+      "type": "string",
+      "title": "Connection string",
+      "description": "Full engine-native URI, e.g. postgres://user:pw@host/db. Replaces Host/Port/User/Password/Database — do not set both.",
+      "sensitive": true,
+      "required": false
+    },
+    "path": {
+      "type": "string",
+      "title": "Database file (sqlite / duckdb)",
+      "description": "Path to the .db / .duckdb file. ~ is expanded.",
+      "required": false
+    },
+    "api_key": {
+      "type": "string",
+      "title": "API key (elasticsearch / opensearch / qdrant)",
+      "sensitive": true,
+      "required": false
+    },
+    "default_database": {
+      "type": "string",
+      "title": "Default database (mongodb)",
+      "description": "Database the document tools use when a call does not name one.",
+      "required": false
+    },
+    "readonly": {
+      "type": "boolean",
+      "title": "Read-only",
+      "description": "Refuse every write tool on this source.",
+      "default": false,
+      "required": false
+    },
+    "connect_timeout_seconds": {
+      "type": "number",
+      "title": "Connect timeout (seconds)",
+      "description": "Default 10.",
+      "required": false
+    },
+    "pii": {
+      "type": "boolean",
+      "title": "Redact sensitive values",
+      "description": "Mask passwords, tokens, emails, card numbers and the like on the way out. Recommended for anything with real user data.",
+      "default": false,
+      "required": false
+    },
+    "pii_columns": {
+      "type": "string",
+      "title": "Redaction: column patterns",
+      "description": "Comma-separated case-insensitive globs, e.g. *email*, users.address_*. Blank uses the built-in set.",
+      "required": false
+    },
+    "pii_values": {
+      "type": "string",
+      "title": "Redaction: value detectors",
+      "description": "Comma-separated subset of email, credit_card, iban, ssn, phone, jwt, private_key, aws_key. Blank runs all of them; [] runs none.",
+      "required": false
+    },
+    "pii_mode": {
+      "type": "string",
+      "title": "Redaction: mode",
+      "description": "redact (default), hash — stable sha256 so equal values still group — or drop.",
+      "required": false
+    },
+    "ssh_host": {
+      "type": "string",
+      "title": "SSH tunnel: host",
+      "description": "Bastion the database is dialed through. Leave blank for a direct connection.",
+      "required": false
+    },
+    "ssh_port": {
+      "type": "number",
+      "title": "SSH tunnel: port",
+      "description": "Default 22.",
+      "required": false
+    },
+    "ssh_user": {
+      "type": "string",
+      "title": "SSH tunnel: username",
+      "description": "Required when a tunnel host is set.",
+      "required": false
+    },
+    "ssh_identity_file": {
+      "type": "file",
+      "title": "SSH tunnel: private key",
+      "description": "Blank tries the ssh-agent, then the default ~/.ssh keys.",
+      "required": false
+    },
+    "ssh_passphrase": {
+      "type": "string",
+      "title": "SSH tunnel: key passphrase",
+      "sensitive": true,
+      "required": false
+    },
+    "ssh_password": {
+      "type": "string",
+      "title": "SSH tunnel: password",
+      "description": "Password auth, if the bastion has no key.",
+      "sensitive": true,
+      "required": false
+    },
+    "ssh_use_agent": {
+      "type": "boolean",
+      "title": "SSH tunnel: use ssh-agent",
+      "default": false,
+      "required": false
+    },
+    "ssh_known_hosts_file": {
+      "type": "file",
+      "title": "SSH tunnel: known_hosts",
+      "description": "Host-key verification file. Default ~/.ssh/known_hosts.",
+      "required": false
+    },
+    "docker_container": {
+      "type": "string",
+      "title": "Docker container",
+      "description": "Name or id of the container the database runs in; its published port is dialed instead of Host/Port.",
+      "required": false
+    },
+    "docker_port": {
+      "type": "number",
+      "title": "Docker: port inside the container",
+      "description": "Only when it is not the engine default.",
+      "required": false
+    },
+    "s2_engine": {
+      "type": "string",
+      "title": "Source 2: engine",
+      "description": "Leave blank to skip this slot. mysql, mariadb, postgres, sqlite, duckdb, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant.",
+      "required": false
+    },
+    "s2_name": {
+      "type": "string",
+      "title": "Source 2: name",
+      "description": "What the model calls it. Default: db2.",
+      "default": "db2",
+      "required": false
+    },
+    "s2_description": {
+      "type": "string",
+      "title": "Source 2: description",
+      "required": false
+    },
+    "s2_host": {
+      "type": "string",
+      "title": "Source 2: host",
+      "required": false
+    },
+    "s2_port": {
+      "type": "number",
+      "title": "Source 2: port",
+      "required": false
+    },
+    "s2_user": {
+      "type": "string",
+      "title": "Source 2: username",
+      "required": false
+    },
+    "s2_password": {
+      "type": "string",
+      "title": "Source 2: password",
+      "sensitive": true,
+      "required": false
+    },
+    "s2_database": {
+      "type": "string",
+      "title": "Source 2: database",
+      "required": false
+    },
+    "s2_dsn": {
+      "type": "string",
+      "title": "Source 2: connection string",
+      "description": "Replaces host/port/user/password/database.",
+      "sensitive": true,
+      "required": false
+    },
+    "s2_path": {
+      "type": "string",
+      "title": "Source 2: database file (sqlite / duckdb)",
+      "required": false
+    },
+    "s2_readonly": {
+      "type": "boolean",
+      "title": "Source 2: read-only",
+      "default": false,
+      "required": false
+    },
+    "s2_pii": {
+      "type": "boolean",
+      "title": "Source 2: redact sensitive values",
+      "default": false,
+      "required": false
+    },
+    "s3_engine": {
+      "type": "string",
+      "title": "Source 3: engine",
+      "description": "Leave blank to skip this slot. mysql, mariadb, postgres, sqlite, duckdb, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant.",
+      "required": false
+    },
+    "s3_name": {
+      "type": "string",
+      "title": "Source 3: name",
+      "description": "What the model calls it. Default: db3.",
+      "default": "db3",
+      "required": false
+    },
+    "s3_description": {
+      "type": "string",
+      "title": "Source 3: description",
+      "required": false
+    },
+    "s3_host": {
+      "type": "string",
+      "title": "Source 3: host",
+      "required": false
+    },
+    "s3_port": {
+      "type": "number",
+      "title": "Source 3: port",
+      "required": false
+    },
+    "s3_user": {
+      "type": "string",
+      "title": "Source 3: username",
+      "required": false
+    },
+    "s3_password": {
+      "type": "string",
+      "title": "Source 3: password",
+      "sensitive": true,
+      "required": false
+    },
+    "s3_database": {
+      "type": "string",
+      "title": "Source 3: database",
+      "required": false
+    },
+    "s3_dsn": {
+      "type": "string",
+      "title": "Source 3: connection string",
+      "description": "Replaces host/port/user/password/database.",
+      "sensitive": true,
+      "required": false
+    },
+    "s3_path": {
+      "type": "string",
+      "title": "Source 3: database file (sqlite / duckdb)",
+      "required": false
+    },
+    "s3_readonly": {
+      "type": "boolean",
+      "title": "Source 3: read-only",
+      "default": false,
+      "required": false
+    },
+    "s3_pii": {
+      "type": "boolean",
+      "title": "Source 3: redact sensitive values",
+      "default": false,
+      "required": false
+    },
+    "s4_engine": {
+      "type": "string",
+      "title": "Source 4: engine",
+      "description": "Leave blank to skip this slot. mysql, mariadb, postgres, sqlite, duckdb, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant.",
+      "required": false
+    },
+    "s4_name": {
+      "type": "string",
+      "title": "Source 4: name",
+      "description": "What the model calls it. Default: db4.",
+      "default": "db4",
+      "required": false
+    },
+    "s4_description": {
+      "type": "string",
+      "title": "Source 4: description",
+      "required": false
+    },
+    "s4_host": {
+      "type": "string",
+      "title": "Source 4: host",
+      "required": false
+    },
+    "s4_port": {
+      "type": "number",
+      "title": "Source 4: port",
+      "required": false
+    },
+    "s4_user": {
+      "type": "string",
+      "title": "Source 4: username",
+      "required": false
+    },
+    "s4_password": {
+      "type": "string",
+      "title": "Source 4: password",
+      "sensitive": true,
+      "required": false
+    },
+    "s4_database": {
+      "type": "string",
+      "title": "Source 4: database",
+      "required": false
+    },
+    "s4_dsn": {
+      "type": "string",
+      "title": "Source 4: connection string",
+      "description": "Replaces host/port/user/password/database.",
+      "sensitive": true,
+      "required": false
+    },
+    "s4_path": {
+      "type": "string",
+      "title": "Source 4: database file (sqlite / duckdb)",
+      "required": false
+    },
+    "s4_readonly": {
+      "type": "boolean",
+      "title": "Source 4: read-only",
+      "default": false,
+      "required": false
+    },
+    "s4_pii": {
+      "type": "boolean",
+      "title": "Source 4: redact sensitive values",
+      "default": false,
+      "required": false
+    },
+    "s5_engine": {
+      "type": "string",
+      "title": "Source 5: engine",
+      "description": "Leave blank to skip this slot. mysql, mariadb, postgres, sqlite, duckdb, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant.",
+      "required": false
+    },
+    "s5_name": {
+      "type": "string",
+      "title": "Source 5: name",
+      "description": "What the model calls it. Default: db5.",
+      "default": "db5",
+      "required": false
+    },
+    "s5_description": {
+      "type": "string",
+      "title": "Source 5: description",
+      "required": false
+    },
+    "s5_host": {
+      "type": "string",
+      "title": "Source 5: host",
+      "required": false
+    },
+    "s5_port": {
+      "type": "number",
+      "title": "Source 5: port",
+      "required": false
+    },
+    "s5_user": {
+      "type": "string",
+      "title": "Source 5: username",
+      "required": false
+    },
+    "s5_password": {
+      "type": "string",
+      "title": "Source 5: password",
+      "sensitive": true,
+      "required": false
+    },
+    "s5_database": {
+      "type": "string",
+      "title": "Source 5: database",
+      "required": false
+    },
+    "s5_dsn": {
+      "type": "string",
+      "title": "Source 5: connection string",
+      "description": "Replaces host/port/user/password/database.",
+      "sensitive": true,
+      "required": false
+    },
+    "s5_path": {
+      "type": "string",
+      "title": "Source 5: database file (sqlite / duckdb)",
+      "required": false
+    },
+    "s5_readonly": {
+      "type": "boolean",
+      "title": "Source 5: read-only",
+      "default": false,
+      "required": false
+    },
+    "s5_pii": {
+      "type": "boolean",
+      "title": "Source 5: redact sensitive values",
+      "default": false,
+      "required": false
+    },
+    "config_file": {
+      "type": "file",
+      "title": "Config file",
+      "description": "A ds-mcp config.json holding as many sources as you like. Its sources are merged with the one configured above.",
+      "required": false
+    },
+    "sources_json": {
+      "type": "string",
+      "title": "Extra sources (JSON)",
+      "description": "The `sources` object from a ds-mcp config, inline: {\"warehouse\": {\"engine\": \"postgres\", ...}}.",
+      "sensitive": true,
+      "required": false
+    },
+    "query_timeout_seconds": {
+      "type": "number",
+      "title": "Query timeout (seconds)",
+      "description": "Default 30.",
+      "required": false
+    },
+    "read_only_all": {
+      "type": "boolean",
+      "title": "Force every source read-only",
+      "description": "Applies to the config file and extra sources too.",
+      "default": false,
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "__PLATFORM__"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+<!-- ds-mcp icon: the classic database cylinder, three discs for the three
+     shapes it serves (relational, document, key-value).
+     Render: rsvg-convert -w 512 -h 512 icon.svg -o icon.png -->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1F6FEB"/>
+      <stop offset="1" stop-color="#0B3E8F"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round">
+    <ellipse cx="32" cy="19" rx="17" ry="6.5" fill="#FFFFFF" stroke="none"/>
+    <path d="M15 19v10c0 3.59 7.61 6.5 17 6.5s17-2.91 17-6.5V19"/>
+    <path d="M15 31v10c0 3.59 7.61 6.5 17 6.5s17-2.91 17-6.5V31" opacity="0.75"/>
+    <path d="M15 43v2c0 3.59 7.61 6.5 17 6.5s17-2.91 17-6.5v-2" opacity="0.5"/>
+  </g>
+</svg>

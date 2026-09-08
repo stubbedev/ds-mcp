@@ -59,8 +59,23 @@ sync-schema:
         echo "sync-schema: schema already in sync"
     fi
 
+# Build a .mcpb bundle for this machine into dist/ — the same artifact
+# release.yml attaches for every platform. Install it in Claude Desktop via
+# Settings -> Extensions -> Advanced -> install from file.
+bundle:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$(uname -s)" in
+        Darwin) platform=darwin ;;
+        MINGW*|MSYS*|CYGWIN*) platform=win32 ;;
+        *) platform=linux ;;
+    esac
+    target="$(rustc -vV | sed -n 's/^host: //p')"
+    cargo build --release
+    packaging/mcpb/pack.sh target/release/ds-mcp "$platform" "dist/ds-mcp_${target}.mcpb"
+
 clean:
-    rm -rf bin/
+    rm -rf bin/ dist/
     cargo clean
 
 # ─────────────────────────── Nix ───────────────────────────
