@@ -113,7 +113,7 @@ jobs:
           files: dist/*
 
   # Regenerates the tap formula from this release's checksums and pushes it
-  # to stubbedev/homebrew-ds-mcp. Needs the HOMEBREW_TAP_TOKEN secret
+  # to stubbedev/homebrew-tap. Needs the HOMEBREW_TAP_TOKEN secret
   # (fine-grained PAT, Contents: read/write on the tap repo only).
   bump-tap:
     name: bump homebrew tap
@@ -127,7 +127,7 @@ jobs:
 
       - uses: actions/checkout@v7
         with:
-          repository: stubbedev/homebrew-ds-mcp
+          repository: stubbedev/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
 
