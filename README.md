@@ -8,6 +8,7 @@ or streamable HTTP, behind a single unified tool surface.
 ## Install
 
 ```sh
+brew tap stubbedev/tap
 brew install stubbedev/tap/ds-mcp # macOS / Linux
 cargo install --path . --locked     # from a checkout (or: just install)
 nix build .#default                 # via the flake
