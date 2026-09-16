@@ -57,8 +57,10 @@ impl Registry {
 
 /// Resolves which Registry a tool call should use. Per-workspace
 /// `.ds-mcp.json` files (from MCP client roots) override the global config;
-/// registries built from them are cached by (path, mtime) so an edited file
-/// is picked up on the next call.
+/// registries built from them are cached by (path, mtime, len) so an edited
+/// file is picked up on the next call. The length matters because many
+/// filesystems give mtime one-second granularity: two edits within that
+/// second would otherwise look like a cache hit.
 pub struct Resolver {
     global: Option<Arc<Registry>>,
     force_readonly: bool,
@@ -67,6 +69,7 @@ pub struct Resolver {
 
 struct CachedRoot {
     mtime: SystemTime,
+    len: u64,
     registry: Arc<Registry>,
 }
 
@@ -101,10 +104,11 @@ impl Resolver {
                 continue;
             };
             let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let len = meta.len();
             let mut cache = self.by_path.lock().await;
             let hit = cache
                 .get(&path)
-                .filter(|cached| cached.mtime == mtime)
+                .filter(|cached| cached.mtime == mtime && cached.len == len)
                 .map(|cached| Arc::clone(&cached.registry));
             if let Some(registry) = hit {
                 drop(cache);
@@ -116,6 +120,7 @@ impl Resolver {
                 path,
                 CachedRoot {
                     mtime,
+                    len,
                     registry: registry.clone(),
                 },
             ) {

@@ -33,6 +33,10 @@ pub struct DsServer {
     /// Workspace roots fetched from this session's client; cleared on
     /// `roots/list_changed`. One `DsServer` instance == one session.
     roots_cache: Arc<tokio::sync::Mutex<Option<Vec<std::path::PathBuf>>>>,
+    /// Full copies of results that had to be truncated, so `read_more` can
+    /// page through them. Ids are random and unguessable because one server
+    /// instance may serve several HTTP clients.
+    results: Arc<crate::caps::Store>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -40,13 +44,18 @@ pub struct DsServer {
 /// that parse it.
 fn ok_json<T: serde::Serialize>(value: &T) -> CallToolResult {
     match serde_json::to_value(value) {
-        Ok(v) => ok_value(v),
+        Ok(v) => ok_value(v, None),
         Err(e) => err(format!("serialize result: {e}")),
     }
 }
 
-fn ok_value(v: Value) -> CallToolResult {
-    let text = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+/// Compact JSON for the text content: every result also carries the same
+/// value as `structuredContent`, so the text copy only exists for clients
+/// that feed it to the model verbatim — indentation whitespace there is
+/// pure token cost.
+fn ok_value(mut v: Value, store: Option<&crate::caps::Store>) -> CallToolResult {
+    crate::caps::cap_for_context(&mut v, store);
+    let text = serde_json::to_string(&v).unwrap_or_else(|_| v.to_string());
     let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
     result.structured_content = Some(v);
     result
@@ -57,6 +66,9 @@ fn err(msg: impl Into<String>) -> CallToolResult {
 }
 
 const DEFAULT_ROW_LIMIT: usize = 1000;
+/// Upper bound for an explicit `limit`: one result set that big is already
+/// most of a context window, and it bounds this server's own memory too.
+const MAX_ROW_LIMIT: usize = 10_000;
 
 #[derive(Deserialize, JsonSchema)]
 pub struct SourceArg {
@@ -95,6 +107,20 @@ pub struct QueryArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct ReadMoreArgs {
+    /// Result id from the `read_more {\"id\":\"...\"}` marker in a truncated result.
+    pub id: String,
+    /// JSON Pointer (RFC 6901) to the truncated string/array, copied from the marker.
+    /// Omit (or pass "") for the result root.
+    pub pointer: Option<String>,
+    /// Where to continue reading: characters into a string, items into an array.
+    pub offset: Option<usize>,
+    /// How much to read this call (chars/items). Default 4096 for strings,
+    /// 1000 for arrays; maximum 4096/5000.
+    pub length: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct ExecuteArgs {
     pub source: String,
     /// The write to run, in the source's native form:
@@ -117,6 +143,7 @@ impl DsServer {
         Self {
             resolver,
             roots_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            results: Arc::new(crate::caps::Store::default()),
             tool_router: Self::tool_router(),
         }
     }
@@ -217,7 +244,7 @@ impl DsServer {
                     if let Some(filter) = pii {
                         filter.apply(&mut json);
                     }
-                    ok_value(json)
+                    ok_value(json, Some(&self.results))
                 }
                 Err(e) => err(format!("serialize result: {e}")),
             },
@@ -408,7 +435,7 @@ impl DsServer {
     }
 
     #[tool(
-        description = "Run a read against a source. `query` is engine-native: a SQL SELECT/SHOW/DESCRIBE/EXPLAIN string; a MongoDB command document like {\"find\": \"c\", \"filter\": {...}} or {\"aggregate\": \"c\", \"pipeline\": [...]}; a Redis/Valkey command array like [\"GET\", \"k\"]; or an Elasticsearch/OpenSearch/Qdrant REST request document like {\"method\": \"GET\", \"path\": \"/idx/_search\", \"body\": {...}}. Writes are refused here (use execute). Results are capped at `limit` rows/documents with a truncated/has_more flag; paginate with LIMIT/OFFSET (SQL) or skip/limit (mongo).",
+        description = "Run a read against a source. `query` is engine-native: a SQL SELECT/SHOW/DESCRIBE/EXPLAIN string; a MongoDB command document like {\"find\": \"c\", \"filter\": {...}} or {\"aggregate\": \"c\", \"pipeline\": [...]}; a Redis/Valkey command array like [\"GET\", \"k\"]; or an Elasticsearch/OpenSearch/Qdrant REST request document like {\"method\": \"GET\", \"path\": \"/idx/_search\", \"body\": {...}}. Writes are refused here (use execute). Results are capped at `limit` rows/documents with a truncated/has_more flag; paginate with LIMIT/OFFSET (SQL) or skip/limit (mongo). Uniform mongo documents return as SQL-style columns/rows; mixed ones as a documents array. Values too large for one result are cut with a read_more marker — call the read_more tool with the embedded arguments to page through them.",
         annotations(read_only_hint = true)
     )]
     async fn query(
@@ -417,7 +444,7 @@ impl DsServer {
         ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let (src, timeout) = src!(self, ctx, args.source);
-        let limit = args.limit.unwrap_or(DEFAULT_ROW_LIMIT);
+        let limit = args.limit.unwrap_or(DEFAULT_ROW_LIMIT).min(MAX_ROW_LIMIT);
         match src.as_ref() {
             Source::Sql(s) => {
                 let sql = match as_sql_string(&args.query, s.engine().name()) {
@@ -495,7 +522,7 @@ impl DsServer {
     }
 
     #[tool(
-        description = "Run a write against a writable source. `query` is engine-native: any SQL statement (INSERT/UPDATE/DELETE/CREATE/ALTER/CREATE INDEX/...); a MongoDB command document like {\"insert\": ...}, {\"update\": ...}, {\"delete\": ...}, {\"createIndexes\": ...}, {\"drop\": ...}; a Redis/Valkey command array like [\"SET\", \"k\", \"v\"]; or an Elasticsearch/OpenSearch/Qdrant REST request document like {\"method\": \"POST\", \"path\": \"/idx/_doc\", \"body\": {...}}. Refused on read-only sources. No implicit guards — a DELETE without a filter deletes everything.",
+        description = "Run a write against a writable source. `query` is engine-native: any SQL statement (INSERT/UPDATE/DELETE/CREATE/ALTER/CREATE INDEX/...); a MongoDB command document like {\"insert\": ...}, {\"update\": ...}, {\"delete\": ...}, {\"createIndexes\": ...}, {\"drop\": ...}; a Redis/Valkey command array like [\"SET\", \"k\", \"v\"]; or an Elasticsearch/OpenSearch/Qdrant REST request document like {\"method\": \"POST\", \"path\": \"/idx/_doc\", \"body\": {...}}. Refused on read-only sources. No implicit guards — a DELETE without a filter deletes everything. Oversized values in the response carry a read_more marker; call the read_more tool with the embedded arguments to page through them.",
         annotations(destructive_hint = true)
     )]
     async fn execute(
@@ -526,7 +553,9 @@ impl DsServer {
                 self.run(
                     timeout,
                     Filter::new(src.pii(), &tables),
-                    m.run_command(args.database.as_deref(), cmd, None),
+                    // Capped even on the write path: a find/aggregate routed
+                    // through execute gets the same row ceiling as query.
+                    m.run_command(args.database.as_deref(), cmd, Some(DEFAULT_ROW_LIMIT)),
                 )
                 .await
             }
@@ -558,6 +587,28 @@ impl DsServer {
                 )
                 .await
             }
+        }
+    }
+
+    #[tool(
+        description = "Page through a truncated result. query/execute/schema replace values too large for one result with a `[truncated N chars; read_more {\"id\":\"...\",\"ptr\":\"...\",\"off\":N}]` marker; pass the embedded arguments here (advance `offset` to page). Returns {value, offset, length, total, has_more} for a window of characters (strings) or items (arrays).",
+        annotations(read_only_hint = true)
+    )]
+    async fn read_more(&self, Parameters(args): Parameters<ReadMoreArgs>) -> CallToolResult {
+        let Some(full) = self.results.get(&args.id) else {
+            return err(format!(
+                "unknown or evicted result id {:?}; re-run the query that produced it",
+                args.id
+            ));
+        };
+        match crate::caps::read_window(
+            &full,
+            args.pointer.as_deref().unwrap_or(""),
+            args.offset.unwrap_or(0),
+            args.length,
+        ) {
+            Ok(v) => ok_value(v, Some(&self.results)),
+            Err(e) => err(e),
         }
     }
 }
@@ -631,7 +682,9 @@ impl ServerHandler for DsServer {
         if let Some(filter) = Filter::new(src.pii(), &[]) {
             filter.apply(&mut schema);
         }
-        let text = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string());
+        let mut schema = schema;
+        crate::caps::cap_for_context(&mut schema, Some(&self.results));
+        let text = serde_json::to_string(&schema).unwrap_or_else(|_| schema.to_string());
         // rmcp 3 lets a handler answer with either the finished result or an
         // MRTR input request (SEP-2322); this one never needs client input.
         Ok(ReadResourceResult::new(vec![ResourceContents::text(text, request.uri)]).into())
@@ -649,7 +702,9 @@ impl ServerHandler for DsServer {
              key-value engines through one tool set. Call list_sources first, then \
              schema to introspect, and query/execute to read/write. The query payload \
              is engine-native: a SQL string, a MongoDB command document, or a Redis \
-             command array.",
+             command array. Values too large for one result are truncated in place \
+             with a read_more marker; call the read_more tool with the arguments \
+             embedded in that marker to page through the rest.",
         )
     }
 }
@@ -657,6 +712,27 @@ impl ServerHandler for DsServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncated_results_carry_a_way_back() {
+        let store = crate::caps::Store::default();
+        let mut v = serde_json::json!({
+            "columns": ["blob"],
+            "rows": [["x".repeat(5000)]],
+        });
+        crate::caps::cap_for_context(&mut v, Some(&store));
+        let result = ok_value(v, Some(&store));
+        let text = result.content[0]
+            .as_text()
+            .map(|t| t.text.as_str())
+            .expect("text");
+        // Compact serialization: no pretty-print padding, and the marker's
+        // read_more arguments ride along inside the (escaped) JSON string.
+        assert!(!text.contains('\n'), "{text}");
+        assert!(text.contains("truncated 5000 chars"), "{text}");
+        assert!(text.contains("read_more "), "{text}");
+        assert!(result.structured_content.is_some());
+    }
 
     #[test]
     fn structured_payloads_accept_stringified_json() {

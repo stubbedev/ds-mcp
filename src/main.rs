@@ -1,3 +1,4 @@
+mod caps;
 mod config;
 mod detect;
 mod http;
@@ -107,6 +108,13 @@ async fn serve(
     match (&mut cfg, env_cfg) {
         // DS_MCP_* sources join a file config and win on name clashes.
         (Some(file), Some(env)) => {
+            for name in env.sources.keys() {
+                if file.sources.contains_key(name) {
+                    tracing::warn!(
+                        "env source {name:?} overrides the config file source of the same name"
+                    );
+                }
+            }
             file.sources.extend(env.sources);
             file.query_timeout_seconds = file.query_timeout_seconds.or(env.query_timeout_seconds);
         }

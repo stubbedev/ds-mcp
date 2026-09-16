@@ -290,7 +290,7 @@ fn redis_to_json(v: redis::Value) -> Value {
         // Nil is "no value"; a Push is a pubsub frame with no place in a
         // query result. Both are null.
         R::Nil | R::Push { .. } => Value::Null,
-        R::ServerError(e) => Value::String(format!("error: {e:?}")),
+        R::ServerError(e) => Value::String(format!("error: {e}")),
         other => Value::String(format!("{other:?}")),
     }
 }

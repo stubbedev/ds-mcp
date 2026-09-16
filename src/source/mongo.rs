@@ -261,20 +261,75 @@ fn fetch_limit(limit: usize) -> i64 {
 /// Extract `cursor.firstBatch` from a find/aggregate result, applying the
 /// row cap (the command fetched limit+1 to detect more).
 fn cursor_docs(result: &Document, limit: usize) -> Value {
-    let batch = result
-        .get_document("cursor")
-        .ok()
+    let cursor = result.get_document("cursor").ok();
+    let batch = cursor
         .and_then(|c| c.get_array("firstBatch").ok())
         .cloned()
         .unwrap_or_default();
+    // A live cursor id means more batches exist server-side. Length alone is
+    // not enough: a user-set batchSize smaller than the cap keeps firstBatch
+    // short no matter how many documents match.
+    let id_open = cursor
+        .and_then(|c| match c.get("id") {
+            Some(Bson::Int64(id)) => Some(*id != 0),
+            Some(Bson::Int32(id)) => Some(*id != 0),
+            _ => None,
+        })
+        .unwrap_or(false);
     let mut docs: Vec<Value> = batch.into_iter().map(Bson::into_relaxed_extjson).collect();
-    let has_more = docs.len() > limit;
+    let has_more = docs.len() > limit || id_open;
     docs.truncate(limit);
+    tabulate(&docs, has_more)
+}
+
+/// Uniform documents project to the SQL result shape — field names declared
+/// once in `columns`, one positional row per document — which is both the
+/// token-lean encoding (no key repeated per document) and the same tabular
+/// shape the PII filter already redacts positionally. Anything mixed keeps
+/// the per-document `documents` array.
+fn tabulate(docs: &[Value], truncated: bool) -> Value {
+    let Some(columns) = uniform_columns(docs) else {
+        return serde_json::json!({
+            "documents": docs,
+            "count": docs.len(),
+            "has_more": truncated,
+        });
+    };
+    let rows: Vec<Vec<Value>> = docs
+        .iter()
+        .map(|doc| {
+            let obj = doc
+                .as_object()
+                .expect("uniform_columns checked every document is an object");
+            columns
+                .iter()
+                .map(|k| obj.get(k).cloned().unwrap_or(Value::Null))
+                .collect()
+        })
+        .collect();
     serde_json::json!({
-        "documents": docs,
-        "count": docs.len(),
-        "has_more": has_more,
+        "columns": columns,
+        "rows": rows,
+        "row_count": rows.len(),
+        "truncated": truncated,
     })
+}
+
+/// The shared field list when every document is an object with the same key
+/// set (in the first document's order), else None. Empty key sets and empty
+/// batches do not qualify.
+fn uniform_columns(docs: &[Value]) -> Option<Vec<String>> {
+    let first = docs.first()?.as_object()?;
+    if first.is_empty() {
+        return None;
+    }
+    let columns: Vec<String> = first.keys().cloned().collect();
+    let uniform = docs[1..].iter().all(|doc| {
+        doc.as_object().is_some_and(|map| {
+            map.len() == columns.len() && columns.iter().all(|k| map.contains_key(k))
+        })
+    });
+    uniform.then_some(columns)
 }
 
 #[cfg(test)]
@@ -331,5 +386,119 @@ mod tests {
     #[test]
     fn non_object_rejected() {
         assert!(to_doc(serde_json::json!([1, 2])).is_err());
+    }
+
+    #[test]
+    fn has_more_survives_a_small_batch_size() {
+        // A firstBatch shorter than the cap with a live cursor id must still
+        // report truncation: the server simply has not sent the rest yet.
+        // Uniform documents, so the result is the tabular shape.
+        let result = bson::doc! {
+            "cursor": {
+                "id": 42,
+                "firstBatch": [ {"a": 1}, {"a": 2} ],
+            },
+            "ok": 1,
+        };
+        let v = cursor_docs(&result, 100);
+        assert_eq!(v["truncated"], serde_json::json!(true));
+        assert_eq!(v["row_count"], serde_json::json!(2));
+
+        // Exhausted cursor, batch within the cap: no more.
+        let result = bson::doc! {
+            "cursor": {
+                "id": 0,
+                "firstBatch": [ {"a": 1}, {"a": 2} ],
+            },
+            "ok": 1,
+        };
+        let v = cursor_docs(&result, 100);
+        assert_eq!(v["truncated"], serde_json::json!(false));
+
+        // Over-cap batch (the limit+1 probe): truncated via length.
+        let result = bson::doc! {
+            "cursor": {
+                "id": 0,
+                "firstBatch": [ {"a": 1}, {"a": 2}, {"a": 3} ],
+            },
+            "ok": 1,
+        };
+        let v = cursor_docs(&result, 2);
+        assert_eq!(v["truncated"], serde_json::json!(true));
+        assert_eq!(v["row_count"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn uniform_documents_project_to_the_tabular_shape() {
+        let result = bson::doc! {
+            "cursor": {
+                "id": 0,
+                "firstBatch": [
+                    {"_id": 1, "sku": "A1", "nested": {"qty": 2}},
+                    {"_id": 2, "sku": "B2", "nested": {"qty": 5}},
+                ],
+            },
+            "ok": 1,
+        };
+        let v = cursor_docs(&result, 10);
+        assert_eq!(v["columns"], serde_json::json!(["_id", "sku", "nested"]));
+        // Field order follows the first document; values are positional,
+        // nested values ride along as cells.
+        assert_eq!(
+            v["rows"],
+            serde_json::json!([
+                [1, "A1", {"qty": 2}],
+                [2, "B2", {"qty": 5}],
+            ])
+        );
+        assert_eq!(v["row_count"], serde_json::json!(2));
+        // Key order differing between documents does not break uniformity.
+        let result = bson::doc! {
+            "cursor": {
+                "id": 0,
+                "firstBatch": [
+                    {"_id": 1, "sku": "A1"},
+                    {"sku": "B2", "_id": 2},
+                ],
+            },
+            "ok": 1,
+        };
+        let v = cursor_docs(&result, 10);
+        assert_eq!(v["rows"][1], serde_json::json!([2, "B2"]));
+    }
+
+    #[test]
+    fn mixed_documents_keep_the_per_document_shape() {
+        for batch in [
+            // A missing key in one document.
+            vec![
+                bson::doc! {"a": 1, "b": 2}.into(),
+                bson::doc! {"a": 3}.into(),
+            ],
+            // An extra key in one document.
+            vec![
+                bson::doc! {"a": 1}.into(),
+                bson::doc! {"a": 2, "b": 3}.into(),
+            ],
+            // A non-object element.
+            vec![bson::doc! {"a": 1}.into(), bson::Bson::Int32(7)],
+        ] {
+            let result = bson::doc! {
+                "cursor": {"id": 0, "firstBatch": batch},
+                "ok": 1,
+            };
+            let v = cursor_docs(&result, 10);
+            assert_eq!(v["count"], serde_json::json!(2), "{v}");
+            assert!(v["documents"].is_array(), "{v}");
+            assert!(v.get("columns").is_none(), "{v}");
+        }
+
+        // An empty batch has no columns to declare.
+        let result = bson::doc! {
+            "cursor": {"id": 0, "firstBatch": []},
+            "ok": 1,
+        };
+        let v = cursor_docs(&result, 10);
+        assert_eq!(v["documents"], serde_json::json!([]));
     }
 }

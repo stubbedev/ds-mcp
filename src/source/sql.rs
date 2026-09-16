@@ -252,15 +252,19 @@ impl SqlSource {
         } else {
             let (host, port) = self.resolve(target_host, target_port).await?;
             let mut url = format!("http://{host}:{port}/?");
-            // Writing to a String cannot fail.
+            // Writing to a String cannot fail. Percent-encoded: a password
+            // containing `&`, `=` or `#` would otherwise corrupt the URL.
+            let param = |s: &str| -> String {
+                url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+            };
             if let Some(u) = &cfg.user {
-                let _ = write!(url, "user={u}&");
+                let _ = write!(url, "user={}&", param(u));
             }
             if let Some(p) = &cfg.password {
-                let _ = write!(url, "password={p}&");
+                let _ = write!(url, "password={}&", param(p));
             }
             if let Some(d) = &cfg.database {
-                let _ = write!(url, "database={d}&");
+                let _ = write!(url, "database={}&", param(d));
             }
             url
         };
@@ -679,8 +683,8 @@ fn duckdb_value(v: duckdb::types::Value) -> Value {
 const fn to_micros(unit: duckdb::types::TimeUnit, n: i64) -> i64 {
     use duckdb::types::TimeUnit;
     match unit {
-        TimeUnit::Second => n * 1_000_000,
-        TimeUnit::Millisecond => n * 1_000,
+        TimeUnit::Second => n.saturating_mul(1_000_000),
+        TimeUnit::Millisecond => n.saturating_mul(1_000),
         TimeUnit::Microsecond => n,
         TimeUnit::Nanosecond => n / 1_000,
     }

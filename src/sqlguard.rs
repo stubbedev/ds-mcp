@@ -70,6 +70,8 @@ fn ensure_stmt_read_only(stmt: &Statement) -> Result<(), String> {
         | Statement::ShowColumns { .. }
         | Statement::ShowTables { .. }
         | Statement::ShowDatabases { .. }
+        | Statement::ShowCatalogs { .. }
+        | Statement::ShowProcessList { .. }
         | Statement::ShowSchemas { .. }
         | Statement::ShowCreate { .. }
         | Statement::ShowFunctions { .. }
@@ -148,6 +150,8 @@ mod tests {
             (MySql, "SELECT a FROM t UNION SELECT b FROM u"),
             (MySql, "SHOW TABLES"),
             (MySql, "SHOW DATABASES"),
+            (MySql, "SHOW FULL PROCESSLIST"),
+            (Postgres, "SHOW CATALOGS"),
             (MySql, "DESCRIBE t"),
             (MySql, "EXPLAIN SELECT 1"),
             (Postgres, "SELECT * FROM t LIMIT 5"),
