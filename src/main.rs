@@ -30,7 +30,10 @@ struct Cli {
 enum Command {
     /// Run the MCP server.
     Serve {
-        /// Config file path. Default: ~/.config/ds-mcp/config.json.
+        /// Config file path. Default: the first of
+        /// ~/.config/ds-mcp/config.json or the platform config dir
+        /// (~/Library/Application Support on macOS, %APPDATA% on Windows)
+        /// that exists. A `.env` beside it supplies ${VAR} values.
         #[arg(short, long)]
         config: Option<PathBuf>,
         #[arg(short, long, value_enum, default_value_t = Transport::Stdio)]
@@ -101,7 +104,6 @@ async fn serve(
         // An explicit --config that fails to load is fatal.
         Some(p) => Some(config::load(p)?),
         None => config::default_path_global()
-            .filter(|p| p.exists())
             .map(|p| config::load(&p))
             .transpose()?,
     };

@@ -27,6 +27,9 @@ the connection is filled in from the extension's settings form. See
 ## Configure
 
 Global config lives at `~/.config/ds-mcp/config.json` (or pass `--config`).
+That path works on every platform; if you already keep config in the
+platform directory — `~/Library/Application Support/ds-mcp/config.json` on
+macOS, `%APPDATA%\ds-mcp\config.json` on Windows — that is picked up too.
 See [config.example.json](config.example.json); the full reference is the
 generated [config.schema.json](config.schema.json).
 
@@ -73,7 +76,12 @@ fields (`password`, `dsn`, ssh `password`/`passphrase`) are expanded at load
 time from the process environment, falling back to a `.env` file next to the
 config (real env vars win). So a repo can commit `.ds-mcp.json` with
 `"password": "${DB_PASSWORD}"` and keep the value in a git-ignored `.env`
-beside it. Tunneled mongo sources are forced to `directConnection` — point
+beside it. "Next to the config" is literal — the `.env` is read from the
+config file's own directory, not the working directory — so a global
+`~/.config/ds-mcp/config.json` reads `~/.config/ds-mcp/.env` and will not see
+your repo's. Point `--config` at the repo's `.ds-mcp.json` (or export the
+variables in the client's `env` block) when you want the repo `.env` to
+apply. Tunneled mongo sources are forced to `directConnection` — point
 the URI at one reachable host.
 
 ### Claude Desktop (.mcpb)
@@ -250,7 +258,20 @@ the Mongo command's collection, or the REST path). `values` selects detectors
 by name; `[]` turns value scanning off and leaves the column globs. Omitting
 either keeps its default. `mode` is `redact` (default), `hash` (a stable
 `sha256:` prefix, so equal values still group and join) or `drop` (the
-column/field disappears from the result). NULL stays NULL in every mode; a
+column/field disappears from the result).
+
+`hash` is unsalted and keyed only on the value, so the same input yields the
+same pseudonym in every source, every process and every run — which is what
+makes anonymized joins across databases work: hash `users.email` in Postgres
+and `contacts.email` in Mongo and the model can match customers across both
+without either address reaching the transcript. Two caveats, both from it
+being a plain hash of the value: matching is byte-exact (`A@B.com` and
+`a@b.com` are different pseudonyms, so normalize on the way in if the sources
+disagree on case or formatting), and it is a pseudonym, not a secret — a
+low-entropy value like an email or a phone number stays guessable by anyone
+holding the hash and a dictionary. Set `"mode": "hash"` on *every* source you
+want to join; a source left on `redact` collapses all its values to one
+string. NULL stays NULL in every mode; a
 value detected *inside* a longer string is redacted or hashed in place, since
 `drop` cannot remove half a sentence.
 

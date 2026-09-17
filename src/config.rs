@@ -304,23 +304,63 @@ impl SourceConfig {
     }
 }
 
-/// Default global config path: `$XDG_CONFIG_HOME/ds-mcp/config.json`.
-pub fn default_path_global() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("ds-mcp").join("config.json"))
+/// Candidate global config paths, in probe order. `~/.config/ds-mcp` comes
+/// first on every platform — it is what `--help` and the README promise, and
+/// what people reach for — followed by the platform's own config dir, which
+/// on macOS is `~/Library/Application Support` and on Windows `%APPDATA%`.
+/// Without the first entry a macOS user following the README lands a config
+/// the server never looks at.
+pub fn default_paths_global() -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut push = |dir: PathBuf| {
+        let p = dir.join("ds-mcp").join("config.json");
+        if !paths.contains(&p) {
+            paths.push(p);
+        }
+    };
+    match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(dir) => push(PathBuf::from(dir)),
+        None => {
+            if let Some(home) = dirs::home_dir() {
+                push(home.join(".config"));
+            }
+        }
+    }
+    if let Some(dir) = dirs::config_dir() {
+        push(dir);
+    }
+    paths
 }
 
-/// Load and validate a config file. A `.env` next to the config supplies
-/// `${VAR}` values (real environment variables still win), so a per-repo
-/// `.ds-mcp.json` + `.env` keep secrets out of the committed config. Relative
-/// paths inside the config (sqlite/duckdb `path`, ssh key files) resolve
-/// against the config file's directory.
+/// The first candidate that exists, or None when the user has no global
+/// config (roots-only mode).
+pub fn default_path_global() -> Option<PathBuf> {
+    default_paths_global().into_iter().find(|p| p.exists())
+}
+
+/// Load and validate a config file. A `.env` next to *the config file*
+/// supplies `${VAR}` values (real environment variables still win) — never
+/// the working directory, which for a stdio server is wherever the MCP client
+/// happened to launch it. So a per-repo `.ds-mcp.json` + `.env` keep secrets
+/// out of the committed config, but a global `~/.config/ds-mcp/config.json`
+/// reads `~/.config/ds-mcp/.env`, not the repo's. Relative paths inside the
+/// config (sqlite/duckdb `path`, ssh key files) resolve against the config
+/// file's directory for the same reason.
 pub fn load(path: &Path) -> Result<Config> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let dotenv = load_dotenv(&dir.join(".env"));
-    let mut cfg =
-        parse_with_env(&raw, &dotenv).with_context(|| format!("config {}", path.display()))?;
+    let env_path = dir.join(".env");
+    let dotenv = load_dotenv(&env_path);
+    // Name the .env we actually consulted: it sits beside the config, not in
+    // the working directory, which is not where people look for it first.
+    let mut cfg = parse_with_env(&raw, &dotenv).with_context(|| {
+        format!(
+            "config {} (${{VAR}} values come from the process environment or {})",
+            path.display(),
+            env_path.display()
+        )
+    })?;
     resolve_relative_paths(&mut cfg, dir);
     Ok(cfg)
 }
@@ -730,6 +770,30 @@ mod tests {
 
     fn minimal(engine: &str, extra: &str) -> String {
         format!(r#"{{"sources":{{"s":{{"engine":"{engine}"{extra}}}}}}}"#)
+    }
+
+    /// macOS `dirs::config_dir()` is `~/Library/Application Support`, so
+    /// probing it alone silently ignores the `~/.config` path the docs name.
+    #[test]
+    fn global_paths_always_include_dot_config() {
+        let paths = default_paths_global();
+        let home = dirs::home_dir().unwrap();
+        let expected = match std::env::var_os("XDG_CONFIG_HOME") {
+            Some(dir) => PathBuf::from(dir),
+            None => home.join(".config"),
+        }
+        .join("ds-mcp")
+        .join("config.json");
+        assert_eq!(paths.first(), Some(&expected), "{paths:?}");
+        if let Some(platform) = dirs::config_dir() {
+            let p = platform.join("ds-mcp").join("config.json");
+            assert!(paths.contains(&p), "{paths:?}");
+        }
+        // Deduped when the two resolve to the same place (Linux).
+        let mut sorted = paths.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), paths.len(), "{paths:?}");
     }
 
     #[test]
