@@ -23,11 +23,15 @@ pub struct RestSource {
 /// Elasticsearch/OpenSearch read actions reachable by POST. The "action" is
 /// the first `_`-prefixed path segment (`/{index}/_search` → `_search`); write
 /// actions (`_doc`, `_bulk`, `_update`, `_update_by_query`, ...) are absent, so
-/// they fall through to a write. Matching the segment — not a substring —
-/// keeps an index literally named `my_search` from being taken for a read.
+/// they fall through to a write — the gate is an allowlist, not a blocklist.
+/// Matching the segment — not a substring — keeps an index literally named
+/// `my_search` from being taken for a read. `_eql` is matched one segment
+/// deeper, in `is_read_request`: its only POST reads are `/_eql/search` and
+/// `/_eql/async_search`.
 const ES_READ_ACTIONS: &[&str] = &[
     "_search",
     "_msearch",
+    "_async_search",
     "_count",
     "_field_caps",
     "_mget",
@@ -74,6 +78,40 @@ fn normalized_path(path: &str) -> Option<String> {
     url::Url::parse(&joined).ok().map(|u| u.path().to_string())
 }
 
+/// The Qdrant half of the read gate: the "operation" is the path after the
+/// collection name (`/collections/{c}/points/search` → `points/search`).
+fn qdrant_is_read(segs: &[&str]) -> bool {
+    // Operation = segments after `/collections/{name}`.
+    let op: &[&str] = match segs {
+        ["collections", _collection, rest @ ..] => rest,
+        other => other,
+    };
+    // Retrieve-points-by-id is POST /collections/{c}/points.
+    if op == ["points"] {
+        return true;
+    }
+    // A delete op is a write even next to a read verb.
+    if op.contains(&"delete") {
+        return false;
+    }
+    op.iter().any(|s| QDRANT_READ_OPS.contains(s))
+}
+
+/// The Elasticsearch/OpenSearch half: the first `_`-prefixed segment is the
+/// action and must be on the allowlist.
+fn es_is_read(segs: &[&str]) -> bool {
+    let Some(i) = segs.iter().position(|s| s.starts_with('_')) else {
+        return false;
+    };
+    if segs[i] == "_eql" {
+        // EQL keeps its read verbs one segment below the `_eql` prefix,
+        // and these are its only POST reads.
+        matches!(segs.get(i + 1).copied(), Some("search" | "async_search"))
+    } else {
+        ES_READ_ACTIONS.contains(&segs[i])
+    }
+}
+
 /// Is this request a read? GET/HEAD always are; POST depends on the endpoint;
 /// PUT/DELETE/PATCH always mutate. The POST classifier is the read-only
 /// boundary for the `query` tool, so it (a) classifies the *normalized* path
@@ -88,27 +126,8 @@ pub fn is_read_request(engine: EngineKind, method: &str, path: &str) -> bool {
             };
             let segs: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
             match engine {
-                EngineKind::Qdrant => {
-                    // Operation = segments after `/collections/{name}`.
-                    let op: &[&str] = match segs.as_slice() {
-                        ["collections", _collection, rest @ ..] => rest,
-                        other => other,
-                    };
-                    // Retrieve-points-by-id is POST /collections/{c}/points.
-                    if op == ["points"] {
-                        return true;
-                    }
-                    // A delete op is a write even next to a read verb.
-                    if op.contains(&"delete") {
-                        return false;
-                    }
-                    op.iter().any(|s| QDRANT_READ_OPS.contains(s))
-                }
-                // Elasticsearch / OpenSearch: the first `_`-prefixed segment.
-                _ => segs
-                    .iter()
-                    .find(|s| s.starts_with('_'))
-                    .is_some_and(|a| ES_READ_ACTIONS.contains(a)),
+                EngineKind::Qdrant => qdrant_is_read(&segs),
+                _ => es_is_read(&segs),
             }
         }
         _ => false,
@@ -341,6 +360,13 @@ mod tests {
             ("POST", "/idx/_search"),
             ("POST", "/_search/scroll"),
             ("POST", "/idx/_count"),
+            ("POST", "/idx/_async_search"),
+            ("POST", "/logs/_eql/search"),
+            ("POST", "/logs/_eql/async_search"),
+            ("POST", "/idx/_search/template"),
+            ("POST", "/_msearch/template"),
+            ("POST", "/_render/template"),
+            ("POST", "/idx/_sql"),
         ] {
             assert!(is_read_request(Elasticsearch, m, p), "{m} {p}");
         }
@@ -354,9 +380,20 @@ mod tests {
         assert!(is_read_request(Elasticsearch, "POST", "/a,b/_msearch"));
         for (m, p) in [
             ("POST", "/idx/_doc"),
+            ("POST", "/idx/_create"),
+            ("POST", "/idx/_update"),
             ("POST", "/idx/_bulk"),
             ("POST", "/idx/_update_by_query"),
             ("POST", "/idx/_delete_by_query"),
+            ("POST", "/_reindex"),
+            ("POST", "/idx/_refresh"),
+            ("POST", "/idx/_flush"),
+            ("POST", "/idx/_forcemerge"),
+            ("POST", "/_aliases"),
+            ("POST", "/idx/_close"),
+            ("POST", "/idx/_open"),
+            ("POST", "/idx/_clone"),
+            ("POST", "/_scripts/painless/_execute"),
             ("PUT", "/idx/_doc/1"),
             ("DELETE", "/idx/_doc/1"),
             ("DELETE", "/idx"),
@@ -364,6 +401,9 @@ mod tests {
             // write slip through the read gate.
             ("POST", "/my_search/_doc"),
             ("POST", "/scroll_data/_bulk"),
+            // _eql is only a read for its two search verbs.
+            ("POST", "/logs/_eql/frobnicate"),
+            ("POST", "/_eql"),
         ] {
             assert!(!is_read_request(Elasticsearch, m, p), "{m} {p}");
         }
