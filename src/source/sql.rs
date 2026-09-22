@@ -122,24 +122,7 @@ impl SqlSource {
         let target_port = cfg.port.unwrap_or(default_port);
         Ok(match cfg.engine {
             EngineKind::MySql | EngineKind::MariaDb => {
-                let mut o = if let Some(dsn) = &cfg.dsn {
-                    MySqlConnectOptions::from_str(dsn)?
-                } else {
-                    let mut o = MySqlConnectOptions::new();
-                    if let Some(u) = &cfg.user {
-                        o = o.username(u);
-                    }
-                    if let Some(p) = &cfg.password {
-                        o = o.password(p);
-                    }
-                    if let Some(d) = &cfg.database {
-                        o = o.database(d);
-                    }
-                    o.host(&target_host).port(target_port)
-                };
-                let (host, port) = self.resolve(o.get_host(), o.get_port()).await?;
-                o = o.host(&host).port(port);
-                SqlPool::MySql(opts(cfg).connect_lazy_with(o))
+                self.connect_mysql(&target_host, target_port).await?
             }
             EngineKind::Postgres => {
                 let mut o = if let Some(dsn) = &cfg.dsn {
@@ -204,6 +187,44 @@ impl SqlSource {
                 bail!("engine {} not handled by SqlSource", cfg.engine.name())
             }
         })
+    }
+
+    async fn connect_mysql(&self, target_host: &str, target_port: u16) -> Result<SqlPool> {
+        let cfg = &self.cfg;
+        let mut o = if let Some(dsn) = &cfg.dsn {
+            MySqlConnectOptions::from_str(dsn)?
+        } else {
+            let mut o = MySqlConnectOptions::new();
+            if let Some(u) = &cfg.user {
+                o = o.username(u);
+            }
+            if let Some(p) = &cfg.password {
+                o = o.password(p);
+            }
+            if let Some(d) = &cfg.database {
+                o = o.database(d);
+            }
+            o.host(target_host).port(target_port)
+        };
+        let (host, port) = self.resolve(o.get_host(), o.get_port()).await?;
+        o = o.host(&host).port(port);
+        // Defense in depth, as for postgres: MySQL has no connect option for it,
+        // so every pooled connection opens the session read-only instead. A write
+        // the SQL guard cannot see -- a stored function that inserts, called from
+        // a plain SELECT -- then fails with ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION
+        // rather than running.
+        let mut po = opts::<sqlx::MySql>(cfg);
+        if self.readonly {
+            po = po.after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    sqlx::query("SET SESSION TRANSACTION READ ONLY")
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            });
+        }
+        Ok(SqlPool::MySql(po.connect_lazy_with(o)))
     }
 
     /// SQL Server. The dsn form is an ADO connection string, which carries its
