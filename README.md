@@ -170,9 +170,10 @@ method or unparseable path is refused too.
 A `readonly` source (or `--read-only`) refuses `execute` outright. For defense
 in depth the flag is also pushed down to the connection where the engine
 supports it — sqlite/duckdb open the file read-only, postgres sets
-`default_transaction_read_only`, clickhouse sets `readonly=2` — so a
-side-effecting function the parser can't see is refused too.
-mysql/mariadb/mssql have no per-session switch; for a hard guarantee on those,
+`default_transaction_read_only`, mysql/mariadb open every pooled session with
+`SET SESSION TRANSACTION READ ONLY` (MySQL 5.6.5+/MariaDB 10.0+), clickhouse
+sets `readonly=2` — so a side-effecting function the parser can't see is
+refused too. mssql has no per-session switch; for a hard guarantee on it,
 point the source at a read-only database user.
 
 ### Redacting sensitive columns
