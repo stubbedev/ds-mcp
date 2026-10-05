@@ -230,15 +230,15 @@ mod tests {
     #[test]
     fn check_digits_keep_lookalikes_out() {
         // Right shape, wrong Luhn / mod-97 / SSA block: left alone.
-        assert!(found("order 4242 4242 4242 4243").is_empty());
-        assert!(found("DE89 3704 0044 0532 0130 01").is_empty());
-        assert!(found("666-09-9999").is_empty());
-        assert!(found("219-09-0000").is_empty());
+        assert_eq!(found("order 4242 4242 4242 4243"), Vec::<&str>::new());
+        assert_eq!(found("DE89 3704 0044 0532 0130 01"), Vec::<&str>::new());
+        assert_eq!(found("666-09-9999"), Vec::<&str>::new());
+        assert_eq!(found("219-09-0000"), Vec::<&str>::new());
         // Bare digit runs are ids far more often than they are secrets.
-        assert!(found("order 123456789 shipped").is_empty());
-        assert!(found("v1.2.3 build 20260101").is_empty());
+        assert_eq!(found("order 123456789 shipped"), Vec::<&str>::new());
+        assert_eq!(found("v1.2.3 build 20260101"), Vec::<&str>::new());
         // A local phone number without a country code stays.
-        assert!(found("call 12345678").is_empty());
+        assert_eq!(found("call 12345678"), Vec::<&str>::new());
     }
 
     /// The strings a database is actually full of. A detector that fires here
@@ -282,6 +282,6 @@ mod tests {
         let s = "a@b.co and +4512345678";
         let only_email = spans(s, Some(&["email".to_string()]));
         assert_eq!(only_email.len(), 1);
-        assert!(spans(s, Some(&[])).is_empty());
+        assert_eq!(spans(s, Some(&[])), vec![]);
     }
 }

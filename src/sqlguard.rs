@@ -233,7 +233,10 @@ mod tests {
         r.sort();
         assert_eq!(r, vec!["orders".to_string(), "users".to_string()]);
         // Unparseable yields none rather than a wrong table.
-        assert!(relations(MySql, "FLUSH PRIVILEGES WAT").is_empty());
+        assert_eq!(
+            relations(MySql, "FLUSH PRIVILEGES WAT"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
