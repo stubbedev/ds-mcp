@@ -60,7 +60,7 @@ sync-schema:
     fi
 
 # Build a .mcpb bundle for this machine into dist/ — the same artifact
-# release.yml attaches for every platform. Install it in Claude Desktop via
+# publish.yml attaches for every platform. Install it in Claude Desktop via
 # Settings -> Extensions -> Advanced -> install from file.
 bundle:
     #!/usr/bin/env bash

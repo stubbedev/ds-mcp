@@ -313,7 +313,7 @@ just install-hooks
 
 `config.schema.json` is generated from the config types — edit
 `src/config.rs`, then `just sync-schema`. Releases: `just release-patch`
-(or `-minor` / `-major`) bumps Cargo.toml, tags, and pushes; the Release
+(or `-minor` / `-major`) bumps Cargo.toml, tags, and pushes; the Publish
 workflow builds binaries for all platforms and publishes them to GitHub
 releases, npm (the root package.json wrapper; its version is stamped from
 Cargo.toml and checked against the tag) and the Homebrew tap. Packagist picks

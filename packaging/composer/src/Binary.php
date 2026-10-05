@@ -13,7 +13,7 @@ final class Binary
 {
     public const REPO = 'stubbedev/ds-mcp';
 
-    // Release targets built by .github/workflows/release.yml.
+    // Release targets built by .github/workflows/publish.yml.
     private const TARGETS = [
         'Linux' => ['x86_64' => 'x86_64-unknown-linux-gnu', 'aarch64' => 'aarch64-unknown-linux-gnu'],
         'Darwin' => ['x86_64' => 'x86_64-apple-darwin', 'aarch64' => 'aarch64-apple-darwin'],

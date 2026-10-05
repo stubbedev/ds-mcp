@@ -1,9 +1,11 @@
-name: Release
+name: Publish
 
 on:
   push:
     tags:
       - "v*.*.*"
+  # A manual run builds every target; the publishing jobs only run for tags.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -63,6 +65,7 @@ jobs:
   release:
     name: publish release
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
@@ -114,7 +117,10 @@ jobs:
 
   # Publishes the @stubbedev/ds-mcp wrapper: a launcher whose postinstall
   # fetches this release's binary (scripts/download.mjs), so it must run after
-  # the release assets exist. Auth is npm trusted publishing (OIDC), no token.
+  # the release assets exist. Auth is npm trusted publishing (OIDC). npm can
+  # only trust a package that exists, so the very first publish goes through
+  # the NPM_TOKEN secret instead; delete that secret once the trusted
+  # publisher is configured and later runs use OIDC alone.
   # Composer needs no job: Packagist reads composer.json from the tag.
   npm:
     name: publish npm wrapper
@@ -143,6 +149,7 @@ jobs:
       - name: Publish to npm
         env:
           DS_MCP_SKIP_DOWNLOAD: '1'
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public
 
   # Regenerates the tap formula from this release's checksums and pushes it
