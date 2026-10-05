@@ -13,16 +13,84 @@ clients over stdio or streamable HTTP, behind a single unified tool surface.
 ## Install
 
 ```sh
-brew install stubbedev/tap/ds-mcp # macOS / Linux
-cargo install --path . --locked   # from a checkout (or: just install)
-nix build .#default               # via the flake
+npx -y @stubbedev/ds-mcp@latest serve   # npm — nothing to install up front
+npm install -g @stubbedev/ds-mcp        # npm — global `ds-mcp` on PATH
+composer require --dev stubbedev/ds-mcp # Composer — see below for the binary path
+brew install stubbedev/tap/ds-mcp       # Homebrew (macOS / Linux)
+cargo install --path . --locked         # from a checkout (or: just install)
+nix build .#default                     # via the flake
 ```
 
-Prebuilt binaries for linux/macos/windows are attached to
-[GitHub releases](../../releases); an AUR PKGBUILD lives in
-[packaging/aur](packaging/aur). For Claude Desktop, install the platform
-`.mcpb` from the same release (Settings → Extensions → Advanced → install from
-file) — see [Claude Desktop](#claude-desktop-mcpb).
+Every route runs the same native binary; the npm and Composer packages are
+thin launchers around it. Both fetch the binary for your platform from the
+GitHub release matching the installed version at install time, verify it
+against the release checksums and cache it inside the package; if that
+download did not happen (offline, or the Composer plugin was declined), the
+launcher fetches it on first run. Both cover linux-x64/arm64 (glibc), macOS
+x64/arm64 and windows-x64. Set `DS_MCP_SKIP_DOWNLOAD=1` to skip the
+install-time download, or `DS_MCP_BINARY` to run your own build instead.
+
+The Composer package is a plugin, so Composer asks once whether to trust it.
+For non-interactive installs (CI, provisioning), allow it up front:
+
+```sh
+composer config allow-plugins.stubbedev/ds-mcp true          # per project
+composer global config allow-plugins.stubbedev/ds-mcp true   # per user
+```
+
+The install prints the binary's path. MCP clients can run that native binary
+directly, keeping PHP out of the request path, or go through the launcher:
+
+| Composer install | native binary (no PHP at runtime) | PHP launcher |
+|---|---|---|
+| per project | `vendor/stubbedev/ds-mcp/bin/ds-mcp-native` | `vendor/bin/ds-mcp` |
+| per user | `$(composer global config home)/vendor/stubbedev/ds-mcp/bin/ds-mcp-native` | `$(composer global config bin-dir --absolute)/ds-mcp` |
+
+On Windows the binary is `ds-mcp-native.exe`.
+
+Prebuilt binaries are also attached to [GitHub releases](../../releases); an
+AUR PKGBUILD lives in [packaging/aur](packaging/aur). For Claude Desktop,
+install the platform `.mcpb` from the same release (Settings → Extensions →
+Advanced → install from file) — see [Claude Desktop](#claude-desktop-mcpb).
+
+### Add it to a client
+
+Claude Code:
+
+```sh
+claude mcp add datastore -- npx -y @stubbedev/ds-mcp@latest serve   # via npm
+claude mcp add datastore -- "$PWD/vendor/stubbedev/ds-mcp/bin/ds-mcp-native" serve   # via Composer
+claude mcp add datastore -- ds-mcp serve                            # binary on PATH (brew, cargo, npm -g)
+```
+
+Any client that takes an `mcpServers` JSON (Claude Desktop, Cursor, a
+project's `.mcp.json`, …):
+
+```json
+{
+  "mcpServers": {
+    "datastore": {
+      "command": "npx",
+      "args": ["-y", "@stubbedev/ds-mcp@latest", "serve"]
+    }
+  }
+}
+```
+
+In a PHP project, point it at the binary Composer installed instead — a
+project-scoped `.mcp.json` next to `composer.json` pairs well with a
+[`.ds-mcp.json`](#configure) in the same directory:
+
+```json
+{
+  "mcpServers": {
+    "datastore": {
+      "command": "vendor/stubbedev/ds-mcp/bin/ds-mcp-native",
+      "args": ["serve"]
+    }
+  }
+}
+```
 
 ## Configure
 
@@ -246,7 +314,11 @@ just install-hooks
 `config.schema.json` is generated from the config types — edit
 `src/config.rs`, then `just sync-schema`. Releases: `just release-patch`
 (or `-minor` / `-major`) bumps Cargo.toml, tags, and pushes; the Release
-workflow builds binaries for all platforms and publishes them.
+workflow builds binaries for all platforms and publishes them to GitHub
+releases, npm (the root package.json wrapper; its version is stamped from
+Cargo.toml and checked against the tag) and the Homebrew tap. Packagist picks
+the new tag up on its own (composer.json at the repo root; the plugin in
+[packaging/composer](packaging/composer) reads the version from Cargo.toml).
 
 ## License
 

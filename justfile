@@ -119,7 +119,7 @@ _release-checks:
     fi
 
 # Cargo.toml is the single source of truth for the version; the flake reads
-# it and the tag mirrors it.
+# it, the tag mirrors it, and server.json/package.json are stamped from it.
 _release bump:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -137,8 +137,10 @@ _release bump:
     sed -i "0,/^version = \".*\"/s//version = \"${NEW}\"/" Cargo.toml
     # server.json mirrors the version in two places (top-level + package).
     sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${NEW}\"/g" server.json
+    # package.json (the npm wrapper) too; the publish job checks it against the tag.
+    sed -i "0,/\"version\": \"[^\"]*\"/s//\"version\": \"${NEW}\"/" package.json
     cargo build -q   # refresh Cargo.lock
-    git add Cargo.toml Cargo.lock server.json
+    git add Cargo.toml Cargo.lock server.json package.json
     git commit -m "chore: bump to v${NEW}"
     git tag -a "v${NEW}" -m "v${NEW}"
     git push origin HEAD

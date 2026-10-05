@@ -1,0 +1,38 @@
+#!/usr/bin/env php
+<?php
+// Composer launcher (vendor/bin/ds-mcp): the PHP twin of bin/cli.mjs. The
+// Composer plugin (src/ComposerPlugin.php) normally fetches the native binary
+// at install time; this fetches it on first run when the plugin was not
+// allowed to, then hands stdio to it.
+//
+// MCP clients can point at the native binary directly to skip PHP entirely.
+// Through this launcher, pcntl replaces the PHP process with the binary; without
+// pcntl (Windows, minimal PHP builds) the binary runs as a child that inherits
+// the real stdin/stdout, so there is still no per-message relaying. Nothing
+// here may write to stdout: under stdio transport that is the MCP channel.
+
+declare(strict_types=1);
+
+// Loaded by path rather than the autoloader so a global install works too.
+require_once __DIR__ . '/src/Binary.php';
+
+try {
+    $bin = getenv('DS_MCP_BINARY') ?: Stubbedev\DsMcp\Binary::ensure();
+} catch (Throwable $e) {
+    fwrite(STDERR, "[ds-mcp] {$e->getMessage()}\n");
+    exit(1);
+}
+
+$args = array_slice($_SERVER['argv'] ?? [], 1);
+
+if (function_exists('pcntl_exec')) {
+    pcntl_exec($bin, $args);
+    // Only reached when exec failed; fall through to proc_open.
+}
+
+$proc = proc_open(array_merge([$bin], $args), [STDIN, STDOUT, STDERR], $pipes, null, null, ['bypass_shell' => true]);
+if (!is_resource($proc)) {
+    fwrite(STDERR, "[ds-mcp] failed to start binary {$bin}\n");
+    exit(1);
+}
+exit(proc_close($proc));

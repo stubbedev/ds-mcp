@@ -1,0 +1,36 @@
+{
+  "name": "@stubbedev/ds-mcp",
+  "version": "0.3.14",
+  "description": "DataStore MCP — one MCP server for MySQL/MariaDB, PostgreSQL, SQLite, DuckDB, SQL Server, ClickHouse, MongoDB, Redis/Valkey, Elasticsearch/OpenSearch and Qdrant (Rust, distributed as a prebuilt binary)",
+  "mcpName": "io.github.stubbedev/ds-mcp",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["mcp", "model-context-protocol", "database", "mysql", "postgres", "sqlite", "duckdb", "mongodb", "redis", "elasticsearch"],
+  "bin": {
+    "ds-mcp": "bin/cli.mjs"
+  },
+  "files": [
+    "bin/cli.mjs",
+    "scripts/download.mjs",
+    "scripts/postinstall.mjs",
+    "config.schema.json",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stubbedev/ds-mcp.git"
+  },
+  "homepage": "https://github.com/stubbedev/ds-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/stubbedev/ds-mcp/issues"
+  }
+}

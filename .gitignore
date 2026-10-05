@@ -1,6 +1,8 @@
 /target
-/bin
+/bin/*
+!/bin/cli.mjs
 # `nix build` output symlinks.
 /result
 /result-*
 /dist
+/node_modules
