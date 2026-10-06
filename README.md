@@ -97,8 +97,17 @@ project-scoped `.mcp.json` next to `composer.json` pairs well with a
 Global config lives at `~/.config/ds-mcp/config.json` (works on every
 platform; the macOS/Windows platform directories are picked up too), or pass
 `--config`. A `.ds-mcp.json` at a client's workspace root overrides the global
-config for that client; with no global config the server runs roots-only. A
-trusted proxy can inject roots per request via `X-Mcp-Roots`. See
+config for that client; with no global config the server runs roots-only.
+The workspace comes from, in order:
+
+1. an `X-Repo-Root` (or `X-Mcp-Roots`) request header — HTTP only;
+2. the client's `roots/list`, for clients below MCP 2026-07-28 that offer it;
+3. over stdio, the server's working directory and its parents — the nearest
+   `.ds-mcp.json` wins, so a project-scoped `.mcp.json` just works.
+
+Over HTTP from a client on MCP 2026-07-28, which can no longer be asked for
+its roots, send the header yourself, e.g. in Claude Code's `.mcp.json`:
+`"headers": {"X-Repo-Root": "${PWD}"}`. See
 [config.example.json](config.example.json); the full reference is the
 generated [config.schema.json](config.schema.json).
 

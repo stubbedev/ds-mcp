@@ -138,6 +138,13 @@ async fn serve(
     match transport {
         Transport::Stdio => {
             tracing::info!("serving over stdio");
+            let server = match std::env::current_dir() {
+                Ok(dir) => server.with_workdir(dir),
+                Err(e) => {
+                    tracing::warn!("cannot read the working directory, no workspace fallback: {e}");
+                    server
+                }
+            };
             let running = server.serve(rmcp::transport::stdio()).await?;
             running.waiting().await?;
         }

@@ -33,6 +33,12 @@ pub struct DsServer {
     /// Workspace roots fetched from this session's client; cleared on
     /// `roots/list_changed`. One `DsServer` instance == one session.
     roots_cache: Arc<tokio::sync::Mutex<Option<Vec<std::path::PathBuf>>>>,
+    /// The process working directory, set for stdio only: a stdio server is
+    /// spawned by its client inside the workspace, so this is the workspace
+    /// signal when the client supplies no roots (always the case from MCP
+    /// 2026-07-28 on). Over HTTP the server's cwd says nothing about any
+    /// client, so it stays unset there.
+    workdir: Option<std::path::PathBuf>,
     /// Full copies of results that had to be truncated, so `read_more` can
     /// page through them. Ids are random and unguessable because one server
     /// instance may serve several HTTP clients.
@@ -143,16 +149,26 @@ impl DsServer {
         Self {
             resolver,
             roots_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            workdir: None,
             results: Arc::new(crate::caps::Store::default()),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Treat `dir` (and its ancestors) as the workspace when the client
+    /// supplies no usable roots. For the stdio transport.
+    pub fn with_workdir(mut self, dir: std::path::PathBuf) -> Self {
+        self.workdir = Some(dir);
+        self
     }
 
     /// Which registry does this call use? Precedence:
     /// 1. roots injected via HTTP headers (request-scoped, never cached),
     /// 2. the client's roots/list (cached per session, cleared on
     ///    `roots/list_changed`; per-root registries cached by config mtime),
-    /// 3. the global config registry.
+    /// 3. stdio only: the nearest `.ds-mcp.json` from the working directory
+    ///    upwards,
+    /// 4. the global config registry.
     async fn registry(&self, ctx: &RequestContext<RoleServer>) -> Result<Arc<Registry>, String> {
         if let Some(parts) = ctx.extensions.get::<http::request::Parts>() {
             let values = ROOTS_HEADERS.iter().flat_map(|h| {
@@ -208,9 +224,19 @@ impl DsServer {
             }
         }
 
+        if let Some(dir) = &self.workdir {
+            let candidates: Vec<_> = dir.ancestors().map(std::path::Path::to_path_buf).collect();
+            match self.resolver.for_roots(&candidates).await {
+                Ok(Some(reg)) => return Ok(reg),
+                Ok(None) => {}
+                Err(e) => return Err(format!("{e:#}")),
+            }
+        }
+
         self.resolver.global().ok_or_else(|| {
             format!(
-                "no sources configured; add a {} to your workspace root or start the server with --config",
+                "no sources configured; add a {} to your workspace root, start the server with \
+                 --config, or (over HTTP) send the workspace path in an X-Repo-Root header",
                 crate::config::ROOT_CONFIG_NAME
             )
         })
@@ -262,7 +288,7 @@ fn touched_tables(src: &Source, sql: &str) -> Vec<String> {
 }
 
 /// Header names a trusted proxy can use to inject workspace roots. `x-repo-root`
-/// leads: it is the name the rest of this fleet reads, and headers are the only
+/// leads: it is the name the rest of this fleet reads, and over HTTP headers are the only
 /// workspace signal that survives MCP 2026-07-28, which forbids the
 /// server-initiated `roots/list` used as the fallback below.
 const ROOTS_HEADERS: [&str; 5] = [

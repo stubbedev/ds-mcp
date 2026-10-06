@@ -42,16 +42,33 @@ struct Session {
 
 impl Session {
     fn start(config: &str) -> Self {
-        static SESSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("ds-mcp-e2e-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch_dir("e2e");
         let cfg_path = dir.join("config.json");
         std::fs::write(&cfg_path, config).unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ds-mcp"));
+        cmd.args(["serve", "--config"]).arg(&cfg_path);
+        Self::spawn(cmd)
+    }
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ds-mcp"))
-            .args(["serve", "--config"])
-            .arg(&cfg_path)
+    /// Start with no --config and no global config, the way a project-scoped
+    /// `.mcp.json` launches the server: `cwd` is the only workspace signal.
+    fn start_in(cwd: &std::path::Path) -> Self {
+        let empty_home = scratch_dir("home");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ds-mcp"));
+        cmd.arg("serve")
+            .current_dir(cwd)
+            .env("HOME", &empty_home)
+            .env("XDG_CONFIG_HOME", empty_home.join(".config"));
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("DS_MCP_") {
+                cmd.env_remove(key);
+            }
+        }
+        Self::spawn(cmd)
+    }
+
+    fn spawn(mut cmd: Command) -> Self {
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -112,6 +129,16 @@ impl Session {
         drop(self.stdin);
         assert!(self.child.wait().unwrap().success());
     }
+}
+
+/// A fresh, empty directory under the system temp dir.
+fn scratch_dir(tag: &str) -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("ds-mcp-{tag}-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 /// Extract the text content of the tool result with the given id, plus its
@@ -524,4 +551,39 @@ fn pii_redaction_end_to_end() {
         let flagged = row[pii_at] == json!(true);
         assert_eq!(flagged, row[name_at] == json!("email"), "{text}");
     }
+}
+
+/// A stdio server launched without --config picks up the `.ds-mcp.json` of
+/// the workspace it was started in (or above it), since stdio clients on MCP
+/// 2026-07-28 cannot be asked for their roots.
+#[test]
+fn stdio_workspace_config_from_cwd() {
+    let workspace = scratch_dir("workspace");
+    std::fs::write(
+        workspace.join(".ds-mcp.json"),
+        r#"{"sources":{"proj":{"engine":"sqlite","path":"proj.db"}}}"#,
+    )
+    .unwrap();
+    let nested = workspace.join("src").join("deep");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    for cwd in [&workspace, &nested] {
+        let mut session = Session::start_in(cwd);
+        let resp = [session.round_trip(&call(1, "list_sources", &json!({})))];
+        session.close();
+        let (text, is_error) = tool_result(&resp, 1);
+        assert!(!is_error, "cwd {}: {text}", cwd.display());
+        assert!(text.contains("\"proj\""), "cwd {}: {text}", cwd.display());
+    }
+}
+
+#[test]
+fn stdio_without_workspace_config_reports_no_sources() {
+    let cwd = scratch_dir("bare");
+    let mut session = Session::start_in(&cwd);
+    let resp = [session.round_trip(&call(1, "list_sources", &json!({})))];
+    session.close();
+    let (text, is_error) = tool_result(&resp, 1);
+    assert!(is_error, "{text}");
+    assert!(text.contains("no sources configured"), "{text}");
 }
