@@ -1,6 +1,6 @@
 {
   "name": "@stubbedev/ds-mcp",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "description": "DataStore MCP — one MCP server for MySQL/MariaDB, PostgreSQL, SQLite, DuckDB, SQL Server, ClickHouse, MongoDB, Redis/Valkey, Elasticsearch/OpenSearch and Qdrant (Rust, distributed as a prebuilt binary)",
   "mcpName": "io.github.stubbedev/ds-mcp",
   "license": "MIT",
