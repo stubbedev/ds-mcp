@@ -38,11 +38,29 @@ impl client::Handler for HostKeyCheck {
     #[allow(clippy::unused_async_trait_impl)]
     async fn check_server_key(
         &mut self,
-        key: &russh::keys::PublicKey,
+        server_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
         if self.insecure {
             return Ok(true);
         }
+        let key = match server_key {
+            russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } => key,
+            // We never advertise host-certificate algorithms (russh's
+            // `host_key_certificates` stays at its empty default) and trust no
+            // certificate authority, so a certificate here means the server
+            // ignored the negotiation. known_hosts pins bare keys only; refuse
+            // rather than guess at the cert's trust chain.
+            russh::keys::PublicKeyOrCertificate::Certificate(cert) => {
+                tracing::error!(
+                    "ssh host {}:{} presented a host certificate (key id {:?}); \
+                     only known_hosts-pinned host keys are accepted",
+                    self.host,
+                    self.port,
+                    cert.key_id()
+                );
+                return Ok(false);
+            }
+        };
         let checked = match &self.known_hosts {
             Some(path) => russh::keys::check_known_hosts_path(&self.host, self.port, key, path),
             None => russh::keys::check_known_hosts(&self.host, self.port, key),
