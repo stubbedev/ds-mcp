@@ -34,7 +34,7 @@ pub enum SqlPool {
     // ponytail: one connection behind a mutex — duckdb's API is sync and MCP
     // traffic is low; add a real pool if it ever becomes the bottleneck.
     DuckDb(std::sync::Arc<std::sync::Mutex<duckdb::Connection>>),
-    Mssql(deadpool_tiberius::Pool),
+    Mssql(super::mssql::Pool),
     // ClickHouse speaks HTTP; no connection to pool.
     ClickHouse(ClickHouseHttp),
 }
@@ -232,28 +232,27 @@ impl SqlSource {
     async fn connect_mssql(&self, target_host: &str, target_port: u16) -> Result<SqlPool> {
         let cfg = &self.cfg;
         // ADO connection string; TrustServerCertificate etc. go in there.
-        let (mut m, target) = if let Some(dsn) = &cfg.dsn {
-            let addr = tiberius::Config::from_ado_string(dsn)?.get_addr();
+        let (mut config, target) = if let Some(dsn) = &cfg.dsn {
+            let config = super::mssql::config_from_ado(dsn)?;
+            let addr = config.get_addr();
             let (h, p) = addr.rsplit_once(':').unwrap_or((addr.as_str(), "1433"));
             let target = (h.to_string(), p.parse().unwrap_or(1433));
-            (deadpool_tiberius::Manager::from_ado_string(dsn)?, target)
+            (config, target)
         } else {
-            let mut m = deadpool_tiberius::Manager::new();
+            let mut config = tiberius::Config::new();
             if let (Some(u), Some(p)) = (&cfg.user, &cfg.password) {
-                m = m.basic_authentication(u, p);
+                config.authentication(tiberius::AuthMethod::sql_server(u, p));
             }
             if let Some(d) = &cfg.database {
-                m = m.database(d);
+                config.database(d);
             }
-            (m, (target_host.to_string(), target_port))
+            (config, (target_host.to_string(), target_port))
         };
         let (host, port) = self.resolve(&target.0, target.1).await?;
-        m = m
-            .host(host)
-            .port(port)
-            .max_size(8)
-            .create_timeout(cfg.connect_timeout());
-        Ok(SqlPool::Mssql(m.create_pool()?))
+        config.host(host);
+        config.port(port);
+        let pool = super::mssql::Manager::new(config).into_pool(8, cfg.connect_timeout())?;
+        Ok(SqlPool::Mssql(pool))
     }
 
     /// `ClickHouse` speaks HTTP, so there is no pool — just a base URL with
@@ -340,7 +339,7 @@ impl SqlSource {
                 tokio::task::spawn_blocking(move || duckdb_collect(&conn, &sql, fetch)).await??
             }
             SqlPool::Mssql(p) => {
-                // Boxed: deadpool-tiberius' checkout future is ~19KB, and it
+                // Boxed: the deadpool checkout future is ~19KB, and it
                 // would otherwise sit inline in every caller of this fn.
                 let mut conn = Box::pin(p.get())
                     .await
@@ -399,7 +398,7 @@ impl SqlSource {
                 }
             }
             SqlPool::Mssql(p) => {
-                // Boxed: deadpool-tiberius' checkout future is ~19KB, and it
+                // Boxed: the deadpool checkout future is ~19KB, and it
                 // would otherwise sit inline in every caller of this fn.
                 let mut conn = Box::pin(p.get())
                     .await
@@ -712,7 +711,7 @@ const fn to_micros(unit: duckdb::types::TimeUnit, n: i64) -> i64 {
 }
 
 async fn mssql_collect(
-    conn: &mut deadpool_tiberius::Client,
+    conn: &mut super::mssql::Client,
     sql: &str,
     fetch: usize,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {

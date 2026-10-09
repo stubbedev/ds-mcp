@@ -3,6 +3,7 @@
 
 pub mod endpoint;
 pub mod mongo;
+pub mod mssql;
 pub mod redis;
 pub mod rest;
 pub mod sql;
