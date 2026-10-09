@@ -1,0 +1,30 @@
+# cargo-audit config (read by `cargo audit` and the `security` workflow).
+# Every ignore here must say why it is safe and when to drop it.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — rsa: Marvin Attack, non-constant-time private-key
+    # operations. No fixed release exists (patched = [], tracked upstream in
+    # RustCrypto/RSA#626). It reaches us only through russh -> ssh-key/rsa.
+    #
+    # How ds-mcp uses RSA (src/source/ssh.rs, SSH tunnels only):
+    # - No RSA decryption, ever. SSH has no RSA encryption path and russh does
+    #   not implement RSA key exchange, so the decryption oracle Marvin is
+    #   about does not exist here.
+    # - Host-key checking verifies the server's RSA signature: public-key
+    #   operations only.
+    # - The one private-key operation: when the SSH identity file is an RSA
+    #   key (`ssh.identity_file`, or the default ~/.ssh/id_rsa fallback),
+    #   publickey auth signs the session hash in-process (PKCS#1 v1.5,
+    #   unblinded in rsa 0.10.0-rc). That is one signature per tunnel
+    #   connection, over a hash the server only partly controls, observable
+    #   only by the SSH server we chose to connect to. Keys used through
+    #   ssh-agent are signed by the agent, outside this process, and ed25519 /
+    #   ECDSA keys never touch the rsa crate.
+    #
+    # Revisit: remove this entry once russh/ssh-key depend on an rsa release
+    # that fixes it (cargo audit will then stop reporting the ID), or if
+    # ds-mcp ever starts doing RSA decryption or RSA signing on demand for a
+    # remote party.
+    "RUSTSEC-2023-0071",
+]
