@@ -13,144 +13,25 @@
     # derivation, so a source edit reuses them instead of recompiling
     # libduckdb-sys' bundled C++ engine (~15 min of a ~25 min build).
     crane.url = "github:ipetkov/crane";
+    flake-parts = {
+      url = "github:hercules-ci/flake-parts";
+      inputs.nixpkgs-lib.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    {
-      self,
-      nixpkgs,
-      crane,
-    }:
-    let
+    inputs@{ flake-parts, ... }:
+    flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [
         "x86_64-linux"
         "aarch64-linux"
         "x86_64-darwin"
         "aarch64-darwin"
       ];
-      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
-      version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
-
-      # What the -sys crates' build scripts need, for both the package build
-      # and the devShell.
-      buildTools =
-        pkgs: with pkgs; [
-          pkg-config
-          cmake # aws-lc-rs (russh crypto backend)
-          perl
-        ];
-    in
-    {
-      packages = forAllSystems (
-        pkgs:
-        let
-          craneLib = crane.mkLib pkgs;
-
-          # Only what the build reads. Editing the README, the workflows or the
-          # packaging scripts then costs nothing.
-          src = pkgs.lib.fileset.toSource {
-            root = ./.;
-            fileset = pkgs.lib.fileset.unions [
-              ./Cargo.toml
-              ./Cargo.lock
-              # Sets CXXSTDLIB_* so the cc crate does not add its own dynamic
-              # -lstdc++ for duckdb's bundled C++ engine; build.rs links it
-              # statically instead. Dropping it silently changes how the binary
-              # links.
-              ./.cargo
-              ./build.rs
-              ./src
-              ./tests
-            ];
-          };
-
-          # Shared by the deps layer and the final build. crane keys the deps
-          # derivation on Cargo.lock plus these inputs — not on our source — so
-          # editing src/ reuses them.
-          commonArgs = {
-            inherit src;
-            pname = "ds-mcp";
-            strictDeps = true;
-            nativeBuildInputs = buildTools pkgs;
-          };
-
-          # crane folds Cargo.toml and the ds-mcp entry of Cargo.lock into the
-          # deps layer's dummy source, and both carry the version. Every
-          # `chore: bump to vX.Y.Z` would therefore recompile every dependency —
-          # including duckdb's bundled C++ engine — on the one commit that
-          # changes no dependency at all. Pin the version to 0.0.0 here so only
-          # a real Cargo.lock change invalidates the layer; the final build
-          # below still gets the true version.
-          depsSrc = pkgs.runCommandLocal "ds-mcp-deps-src" { } ''
-            cp -r --no-preserve=mode,ownership ${src} $out
-            chmod -R u+w $out
-            sed -i 's/^version = "${version}"$/version = "0.0.0"/' $out/Cargo.toml
-            sed -i '/^name = "ds-mcp"$/{n;s/^version = "${version}"$/version = "0.0.0"/;}' \
-              $out/Cargo.lock
-          '';
-
-          # The cached dependency layer. Tests belong to the final build (and to
-          # CI's own test job), so skip them here: it keeps the artifact that
-          # goes to the binary cache smaller and the layer faster.
-          cargoArtifacts = craneLib.buildDepsOnly (
-            commonArgs
-            // {
-              src = depsSrc;
-              version = "0.0.0";
-              doCheck = false;
-            }
-          );
-        in
-        {
-          default = craneLib.buildPackage (
-            commonArgs
-            // {
-              inherit cargoArtifacts version;
-              # The `rust` CI job runs the whole suite on this commit in under
-              # two minutes. Running it again here costs a second full compile
-              # of ds-mcp against the test harness (~3.5 min in CI) to learn
-              # the same thing, so this build only produces the binary.
-              doCheck = false;
-              meta = {
-                description = "Multi-engine data-source MCP server";
-                license = pkgs.lib.licenses.mit;
-                mainProgram = "ds-mcp";
-              };
-            }
-          );
-
-          # Not useful to install. It exists so CI can push the compiled
-          # dependency layer to the binary cache as its own store path: deps are
-          # a build-time input, absent from the binary's runtime closure, so
-          # pushing `default` alone never carries them — and an unpushed layer
-          # is a ~25 min recompile for every consumer.
-          deps = cargoArtifacts;
-        }
-      );
-
-      devShells = forAllSystems (pkgs: {
-        default = pkgs.mkShell {
-          # Edition 2024; all lints live in Cargo.toml [lints.clippy], so the
-          # toolchain needs nothing extra configured.
-          packages =
-            (with pkgs; [
-              rustc
-              cargo
-              rustfmt
-              clippy
-              rust-analyzer
-              just
-            ])
-            ++ buildTools pkgs;
-          # rust-analyzer resolves std from here.
-          RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
-        };
-      });
-
-      checks = forAllSystems (pkgs: {
-        default = self.packages.${pkgs.system}.default;
-      });
-
-      formatter = forAllSystems (pkgs: pkgs.nixfmt-rfc-style);
+      imports = [
+        ./nix/package.nix
+        ./nix/shell.nix
+        ./nix/toolchain.nix
+      ];
     };
 }
