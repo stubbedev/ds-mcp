@@ -30,6 +30,15 @@
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
       version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+
+      # What the -sys crates' build scripts need, for both the package build
+      # and the devShell.
+      buildTools =
+        pkgs: with pkgs; [
+          pkg-config
+          cmake # aws-lc-rs (russh crypto backend)
+          perl
+        ];
     in
     {
       packages = forAllSystems (
@@ -62,11 +71,7 @@
             inherit src;
             pname = "ds-mcp";
             strictDeps = true;
-            nativeBuildInputs = with pkgs; [
-              pkg-config
-              cmake # aws-lc-rs (russh crypto backend)
-              perl
-            ];
+            nativeBuildInputs = buildTools pkgs;
           };
 
           # crane folds Cargo.toml and the ds-mcp entry of Cargo.lock into the
@@ -125,17 +130,20 @@
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [
-            rustc
-            cargo
-            rustfmt
-            clippy
-            rust-analyzer
-            just
-            pkg-config
-            cmake
-            perl
-          ];
+          # Edition 2024; all lints live in Cargo.toml [lints.clippy], so the
+          # toolchain needs nothing extra configured.
+          packages =
+            (with pkgs; [
+              rustc
+              cargo
+              rustfmt
+              clippy
+              rust-analyzer
+              just
+            ])
+            ++ buildTools pkgs;
+          # rust-analyzer resolves std from here.
+          RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         };
       });
 
