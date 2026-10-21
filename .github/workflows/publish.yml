@@ -21,7 +21,6 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
           - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: macos-latest, target: x86_64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v7
@@ -87,7 +86,7 @@ jobs:
           # release, and bare binaries do not belong there.
           mkdir -p bin
           for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
-                   aarch64-apple-darwin x86_64-apple-darwin; do
+                   aarch64-apple-darwin; do
             tar -xzf "dist/ds-mcp_${GITHUB_REF_NAME}_${t}.tar.gz" -O > "bin/${t}"
           done
           unzip -p "dist/ds-mcp_${GITHUB_REF_NAME}_x86_64-pc-windows-msvc.zip" \
@@ -99,7 +98,6 @@ jobs:
           pack x86_64-unknown-linux-gnu   linux
           pack aarch64-unknown-linux-gnu  linux
           pack aarch64-apple-darwin       darwin
-          pack x86_64-apple-darwin        darwin
           repo/packaging/mcpb/pack.sh bin/x86_64-pc-windows-msvc.exe win32 \
             "dist/ds-mcp_${GITHUB_REF_NAME}_x86_64-pc-windows-msvc.mcpb"
 
@@ -187,12 +185,9 @@ jobs:
             license "MIT"
 
             on_macos do
-              if Hardware::CPU.arm?
+              on_arm do
                 url "${base}/ds-mcp_${GITHUB_REF_NAME}_aarch64-apple-darwin.tar.gz"
                 sha256 "$(sum aarch64-apple-darwin)"
-              else
-                url "${base}/ds-mcp_${GITHUB_REF_NAME}_x86_64-apple-darwin.tar.gz"
-                sha256 "$(sum x86_64-apple-darwin)"
               end
             end
 
