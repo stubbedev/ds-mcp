@@ -53,17 +53,15 @@
       # a derivation, so every system's outputs evaluate without a build.
       ownLockEntry = v: "name = \"ds-mcp\"\nversion = \"${v}\"\n";
       lock = builtins.readFile ../Cargo.lock;
+      pinnedLock = builtins.replaceStrings [ (ownLockEntry version) ] [ (ownLockEntry "0.0.0") ] lock;
       dummySrc = craneLib.mkDummySrc {
         src = lib.fileset.toSource {
           root = ../.;
           fileset = lib.fileset.difference fileset ../Cargo.lock;
         };
         cargoLock =
-          assert lib.assertMsg (lib.hasInfix (ownLockEntry version) lock)
-            "Cargo.lock has no ds-mcp ${version} entry to pin";
-          builtins.toFile "Cargo.lock" (
-            builtins.replaceStrings [ (ownLockEntry version) ] [ (ownLockEntry "0.0.0") ] lock
-          );
+          assert lib.assertMsg (pinnedLock != lock) "Cargo.lock has no ds-mcp ${version} entry to pin";
+          builtins.toFile "Cargo.lock" pinnedLock;
         cleanCargoTomlFilter =
           path:
           path != [
