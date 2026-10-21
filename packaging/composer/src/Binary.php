@@ -83,37 +83,20 @@ final class Binary
     {
         $tag = 'v' . self::version();
         $archive = sprintf('%s_%s_%s%s', self::NAME, $tag, self::target(), self::windows() ? '.zip' : '.tar.gz');
-        $base = sprintf('https://github.com/%s/releases/download/%s', self::REPO, $tag);
-
-        $tmp = self::tmpBeside($cached);
-        if (!@mkdir($tmp, 0755)) {
-            throw new \RuntimeException("Cannot create {$tmp}: " . self::lastError());
-        }
-        try {
-            self::download("{$base}/checksums.txt", "{$tmp}/checksums.txt");
-            $sums = (string) file_get_contents("{$tmp}/checksums.txt");
-            if (!preg_match('/^([0-9a-f]{64})\s+\*?' . preg_quote($archive, '/') . '$/m', $sums, $m)) {
-                throw new \RuntimeException("{$archive} is not listed in {$tag} checksums.txt");
-            }
-            self::download("{$base}/{$archive}", "{$tmp}/{$archive}");
-            if (!hash_equals($m[1], hash_file('sha256', "{$tmp}/{$archive}"))) {
-                throw new \RuntimeException("Checksum mismatch for {$archive}");
-            }
+        self::inTmpDir($cached, static function (string $tmp) use ($tag, $archive, $cached): void {
+            $file = self::fetchRelease($tag, $archive, $tmp);
             $exe = self::NAME . self::exe();
             if (self::windows()) {
                 $zip = new \ZipArchive();
-                if ($zip->open("{$tmp}/{$archive}") !== true || !$zip->extractTo($tmp, $exe)) {
+                if ($zip->open($file) !== true || !$zip->extractTo($tmp, $exe)) {
                     throw new \RuntimeException("Cannot unpack {$archive}");
                 }
                 $zip->close();
             } else {
-                (new \PharData("{$tmp}/{$archive}"))->extractTo($tmp, $exe, true);
+                (new \PharData($file))->extractTo($tmp, $exe, true);
             }
             self::commit("{$tmp}/{$exe}", $cached);
-        } finally {
-            array_map('unlink', glob("{$tmp}/*") ?: []);
-            @rmdir($tmp);
-        }
+        });
     }
 
     private static function cacheDir(): string
@@ -173,6 +156,37 @@ final class Binary
         }
 
         return "{$file}." . bin2hex(random_bytes(6)) . '.tmp';
+    }
+
+    private static function inTmpDir(string $beside, callable $fn): void
+    {
+        $tmp = self::tmpBeside($beside);
+        if (!@mkdir($tmp, 0755)) {
+            throw new \RuntimeException("Cannot create {$tmp}: " . self::lastError());
+        }
+        try {
+            $fn($tmp);
+        } finally {
+            array_map('unlink', glob("{$tmp}/*") ?: []);
+            @rmdir($tmp);
+        }
+    }
+
+    private static function fetchRelease(string $tag, string $asset, string $dir): string
+    {
+        $base = sprintf('https://github.com/%s/releases/download/%s', self::REPO, $tag);
+        self::download("{$base}/checksums.txt", "{$dir}/checksums.txt");
+        $sums = (string) file_get_contents("{$dir}/checksums.txt");
+        if (!preg_match('/^([0-9a-f]{64})\s+\*?' . preg_quote($asset, '/') . '$/m', $sums, $m)) {
+            throw new \RuntimeException("{$asset} is not listed in {$tag} checksums.txt");
+        }
+        $file = "{$dir}/{$asset}";
+        self::download("{$base}/{$asset}", $file);
+        if (!hash_equals($m[1], hash_file('sha256', $file))) {
+            throw new \RuntimeException("Checksum mismatch for {$asset} from {$tag}");
+        }
+
+        return $file;
     }
 
     private static function download(string $url, string $file): void

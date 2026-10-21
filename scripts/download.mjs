@@ -50,34 +50,8 @@ function target() {
 async function fetchInto(cached) {
   const tag = `v${pkg.version}`;
   const archive = `${NAME}_${tag}_${target()}${windows ? '.zip' : '.tar.gz'}`;
-  const base = `https://github.com/${REPO}/releases/download/${tag}`;
-
-  const sums = (await get(`${base}/checksums.txt`)).toString('utf8');
-  const want = sums
-    .split('\n')
-    .map((line) => line.trim().split(/\s+\*?/))
-    .find(([, file]) => file === archive)?.[0];
-  if (!want) throw new Error(`${archive} is not listed in ${tag} checksums.txt`);
-
-  const data = await get(`${base}/${archive}`);
-  if (createHash('sha256').update(data).digest('hex') !== want) {
-    throw new Error(`Checksum mismatch for ${archive}`);
-  }
-  const bin = windows ? unzip(data, `${NAME}${exe}`) : untar(data, NAME);
-
-  const tmp = await tmpBeside(cached);
-  try {
-    await writeFile(tmp, bin);
-    await commit(tmp, cached);
-  } finally {
-    await rm(tmp, { force: true });
-  }
-}
-
-async function get(url) {
-  const res = await fetch(url, { redirect: 'follow' });
-  if (!res.ok) throw new Error(`Failed to download ${url}: HTTP ${res.status}`);
-  return Buffer.from(await res.arrayBuffer());
+  const data = await fetchRelease(tag, archive);
+  await store(windows ? unzip(data, `${NAME}${exe}`) : untar(data, NAME), cached);
 }
 
 function untar(gz, name) {
@@ -158,4 +132,35 @@ async function commit(tmp, dest) {
 async function tmpBeside(file) {
   await mkdir(dirname(file), { recursive: true });
   return `${file}.${randomBytes(6).toString('hex')}.tmp`;
+}
+
+async function fetchRelease(tag, asset) {
+  const base = `https://github.com/${REPO}/releases/download/${tag}`;
+  const sums = (await get(`${base}/checksums.txt`)).toString('utf8');
+  const want = sums
+    .split('\n')
+    .map((line) => line.trim().split(/\s+\*?/))
+    .find(([, file]) => file === asset)?.[0];
+  if (!want) throw new Error(`${asset} is not listed in ${tag} checksums.txt`);
+  const data = await get(`${base}/${asset}`);
+  if (createHash('sha256').update(data).digest('hex') !== want) {
+    throw new Error(`Checksum mismatch for ${asset} from ${tag}`);
+  }
+  return data;
+}
+
+async function get(url) {
+  const res = await fetch(url, { redirect: 'follow' });
+  if (!res.ok) throw new Error(`Failed to download ${url}: HTTP ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+async function store(data, cached) {
+  const tmp = await tmpBeside(cached);
+  try {
+    await writeFile(tmp, data);
+    await commit(tmp, cached);
+  } finally {
+    await rm(tmp, { force: true });
+  }
 }
