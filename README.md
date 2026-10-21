@@ -24,11 +24,19 @@ nix build .#default                     # via the flake
 Every route runs the same native binary; the npm and Composer packages are
 thin launchers around it. Both fetch the binary for your platform from the
 GitHub release matching the installed version at install time, verify it
-against the release checksums and cache it inside the package; if that
+against the release checksums and place it inside the package; if that
 download did not happen (offline, or the Composer plugin was declined), the
 launcher fetches it on first run. Both cover linux-x64/arm64 (glibc), macOS
 x64/arm64 and windows-x64. Set `DS_MCP_SKIP_DOWNLOAD=1` to skip the
 install-time download, or `DS_MCP_BINARY` to run your own build instead.
+
+Each release's binary is downloaded once per user, into
+`$XDG_CACHE_HOME/ds-mcp/<version>/` (by default `~/.cache` on Linux,
+`~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows), and hardlinked into
+every install, or copied where the install is on another filesystem. Further
+projects and git worktrees on the same version install without downloading
+anything. Delete old version directories to reclaim their space; installs keep
+their own link.
 
 The Composer package is a plugin, so Composer asks once whether to trust it.
 For non-interactive installs (CI, provisioning), allow it up front:

@@ -1,25 +1,16 @@
-// Resolves (and, if needed, downloads) the prebuilt binary that matches the
-// current platform. Shared by the postinstall script and the CLI launcher so a
-// failed install (e.g. offline) self-heals on first run.
-//
-// The release ships each binary inside an archive (.tar.gz, or .zip on
-// Windows) listed in checksums.txt; the archive is verified against that list
-// and the one file in it unpacked here, with no tar/unzip dependency.
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { chmod, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, link, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync, inflateRawSync } from 'node:zlib';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const root = join(here, '..');
-const binDir = join(root, 'bin');
+const NAME = 'ds-mcp';
+const REPO = `stubbedev/${NAME}`;
 
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-const REPO = 'stubbedev/ds-mcp';
 
-// Map Node's platform/arch onto the release's Rust target triples.
 const TARGETS = {
   'linux:x64': 'x86_64-unknown-linux-gnu',
   'linux:arm64': 'aarch64-unknown-linux-gnu',
@@ -27,6 +18,18 @@ const TARGETS = {
   'darwin:arm64': 'aarch64-apple-darwin',
   'win32:x64': 'x86_64-pc-windows-msvc',
 };
+
+const windows = process.platform === 'win32';
+const exe = windows ? '.exe' : '';
+
+export async function ensureBinary() {
+  const dest = join(root, 'bin', `${NAME}-native${exe}`);
+  if (await present(dest)) return dest;
+  const cached = join(cacheDir(), `${NAME}_${target()}${exe}`);
+  if (!(await present(cached))) await fetchInto(cached);
+  await place(cached, dest);
+  return dest;
+}
 
 function target() {
   const key = `${process.platform}:${process.arch}`;
@@ -36,7 +39,6 @@ function target() {
       `Unsupported platform ${key}. Build from source (https://github.com/${REPO}#install) and set DS_MCP_BINARY.`,
     );
   }
-  // The linux binaries link glibc; on musl (Alpine) they would not start.
   if (process.platform === 'linux' && !process.report?.getReport().header.glibcVersionRuntime) {
     throw new Error(
       `No prebuilt binary for musl linux. Build from source (https://github.com/${REPO}#install) and set DS_MCP_BINARY.`,
@@ -45,18 +47,30 @@ function target() {
   return t;
 }
 
-const exe = () => (process.platform === 'win32' ? '.exe' : '');
+async function fetchInto(cached) {
+  const tag = `v${pkg.version}`;
+  const archive = `${NAME}_${tag}_${target()}${windows ? '.zip' : '.tar.gz'}`;
+  const base = `https://github.com/${REPO}/releases/download/${tag}`;
 
-export function binaryPath() {
-  return join(binDir, `ds-mcp-native${exe()}`);
-}
+  const sums = (await get(`${base}/checksums.txt`)).toString('utf8');
+  const want = sums
+    .split('\n')
+    .map((line) => line.trim().split(/\s+\*?/))
+    .find(([, file]) => file === archive)?.[0];
+  if (!want) throw new Error(`${archive} is not listed in ${tag} checksums.txt`);
 
-async function exists(path) {
+  const data = await get(`${base}/${archive}`);
+  if (createHash('sha256').update(data).digest('hex') !== want) {
+    throw new Error(`Checksum mismatch for ${archive}`);
+  }
+  const bin = windows ? unzip(data, `${NAME}${exe}`) : untar(data, NAME);
+
+  const tmp = await tmpBeside(cached);
   try {
-    const s = await stat(path);
-    return s.isFile() && s.size > 0;
-  } catch {
-    return false;
+    await writeFile(tmp, bin);
+    await commit(tmp, cached);
+  } finally {
+    await rm(tmp, { force: true });
   }
 }
 
@@ -66,7 +80,6 @@ async function get(url) {
   return Buffer.from(await res.arrayBuffer());
 }
 
-// Pull one regular file out of a gzipped tarball.
 function untar(gz, name) {
   const tar = gunzipSync(gz);
   for (let off = 0; off + 512 <= tar.length; ) {
@@ -81,7 +94,6 @@ function untar(gz, name) {
   throw new Error(`${name} not found in release archive`);
 }
 
-// Pull one stored or deflated file out of a zip via its central directory.
 function unzip(zip, name) {
   const eocd = zip.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
   if (eocd < 0) throw new Error('release archive is not a zip');
@@ -103,35 +115,47 @@ function unzip(zip, name) {
   throw new Error(`${name} not found in release archive`);
 }
 
-// ensureBinary returns the path to the platform binary, downloading it from the
-// matching GitHub release if it is not already present.
-export async function ensureBinary() {
-  const dest = binaryPath();
-  if (await exists(dest)) return dest;
+function cacheDir() {
+  return join(cacheRoot(), NAME, pkg.version);
+}
 
-  const t = target();
-  const tag = `v${pkg.version}`;
-  const archive = `ds-mcp_${tag}_${t}${process.platform === 'win32' ? '.zip' : '.tar.gz'}`;
-  const base = `https://github.com/${REPO}/releases/download/${tag}`;
-
-  const sums = (await get(`${base}/checksums.txt`)).toString('utf8');
-  const want = sums
-    .split('\n')
-    .map((line) => line.trim().split(/\s+\*?/))
-    .find(([, file]) => file === archive)?.[0];
-  if (!want) throw new Error(`${archive} is not listed in ${tag} checksums.txt`);
-
-  const data = await get(`${base}/${archive}`);
-  if (createHash('sha256').update(data).digest('hex') !== want) {
-    throw new Error(`Checksum mismatch for ${archive}`);
+function cacheRoot() {
+  if (process.env.XDG_CACHE_HOME) return process.env.XDG_CACHE_HOME;
+  const [variable, ...suffix] =
+    { win32: ['LOCALAPPDATA'], darwin: ['HOME', 'Library', 'Caches'] }[process.platform] ?? ['HOME', '.cache'];
+  const base = process.env[variable];
+  if (!base) {
+    throw new Error(`Cannot locate a cache directory: neither XDG_CACHE_HOME nor ${variable} is set`);
   }
-  const bin = process.platform === 'win32' ? unzip(data, 'ds-mcp.exe') : untar(data, 'ds-mcp');
+  return join(base, ...suffix);
+}
 
-  await mkdir(binDir, { recursive: true });
-  const tmp = `${dest}.download`;
-  await writeFile(tmp, bin);
-  await chmod(tmp, 0o755).catch(() => {});
-  await rm(dest, { force: true });
+async function present(path) {
+  try {
+    const s = await stat(path);
+    return s.isFile() && s.size > 0;
+  } catch (err) {
+    if (err.code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
+async function place(cached, dest) {
+  const tmp = await tmpBeside(dest);
+  try {
+    await link(cached, tmp).catch(() => copyFile(cached, tmp));
+    await commit(tmp, dest);
+  } finally {
+    await rm(tmp, { force: true });
+  }
+}
+
+async function commit(tmp, dest) {
+  await chmod(tmp, 0o755);
   await rename(tmp, dest);
-  return dest;
+}
+
+async function tmpBeside(file) {
+  await mkdir(dirname(file), { recursive: true });
+  return `${file}.${randomBytes(6).toString('hex')}.tmp`;
 }
