@@ -1,0 +1,94 @@
+name: cargo-audit-fix
+
+on:
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cargo-audit-fix
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  fix:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: cargo-audit
+
+      - name: Find vulnerable crates
+        id: audit
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/audit.json"
+          if cargo audit --json > "$report"; then
+            echo "No vulnerabilities."
+            echo "vulnerable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          jq -r '.vulnerabilities.list[].package | "\(.name)@\(.version)"' "$report" | sort -u > "$RUNNER_TEMP/packages"
+          jq -r '.vulnerabilities.list[].advisory.id' "$report" | sort -u > "$RUNNER_TEMP/advisories"
+          if [ ! -s "$RUNNER_TEMP/packages" ]; then
+            echo "cargo audit failed without reporting a vulnerability:" >&2
+            cat "$report" >&2
+            exit 1
+          fi
+          echo "vulnerable=true" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.audit.outputs.vulnerable == 'true'
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.audit.outputs.vulnerable == 'true'
+
+      - name: Update vulnerable crates
+        if: steps.audit.outputs.vulnerable == 'true'
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r package; do
+            args+=(-p "$package")
+          done < "$RUNNER_TEMP/packages"
+          cargo update "${args[@]}"
+          cargo audit
+
+      - name: Clippy
+        if: steps.audit.outputs.vulnerable == 'true'
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        if: steps.audit.outputs.vulnerable == 'true'
+        run: cargo test --locked
+
+      - name: Commit, push and dispatch CI
+        if: steps.audit.outputs.vulnerable == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          crates="$(sed 's/@.*//' "$RUNNER_TEMP/packages" | paste -sd, - | sed 's/,/, /g')"
+          advisories="$(paste -sd, - < "$RUNNER_TEMP/advisories" | sed 's/,/, /g')"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.lock
+          git commit -m "fix(deps): update ${crates} for ${advisories}" \
+            -m "Automated by the cargo-audit-fix workflow: semver-compatible updates only, checked with cargo audit, clippy and cargo test before pushing."
+          git push origin HEAD:master
+          gh workflow run ci.yml --ref master
+          gh workflow run security.yml --ref master
