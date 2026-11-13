@@ -374,8 +374,7 @@ fn mongo_collection(cmd: &bson::Document) -> Vec<String> {
     cmd.iter()
         .next()
         .and_then(|(_, v)| v.as_str())
-        .map(|c| vec![c.to_string()])
-        .unwrap_or_default()
+        .map_or_default(|c| vec![c.to_string()])
 }
 
 /// The index/collection a REST path addresses: its first segment, or the
@@ -387,8 +386,7 @@ fn rest_container(path: &str) -> Vec<String> {
         other => other,
     };
     name.filter(|s| !s.is_empty() && !s.starts_with('_'))
-        .map(|s| vec![s.to_string()])
-        .unwrap_or_default()
+        .map_or_default(|s| vec![s.to_string()])
 }
 
 /// A Mongo payload must be a command document.

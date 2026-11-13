@@ -195,8 +195,7 @@ impl RedisSource {
                 .cfg
                 .password
                 .as_ref()
-                .map(|p| format!(":{p}@"))
-                .unwrap_or_default();
+                .map_or_default(|p| format!(":{p}@"));
             Ok((
                 format!("redis://{auth}{}:{}/{db}", ep.host, ep.port),
                 ep.tunnel,

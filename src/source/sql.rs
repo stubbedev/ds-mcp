@@ -447,9 +447,7 @@ impl SqlSource {
             }
             EngineKind::DuckDb => "SHOW TABLES".into(),
             EngineKind::Mssql => {
-                let prefix = db
-                    .map(|d| format!("{}.", quote_ident_bracket(d)))
-                    .unwrap_or_default();
+                let prefix = db.map_or_default(|d| format!("{}.", quote_ident_bracket(d)));
                 format!(
                     "SELECT table_schema, table_name FROM {prefix}information_schema.tables \
                      WHERE table_type = 'BASE TABLE' ORDER BY 1, 2"
@@ -499,9 +497,7 @@ impl SqlSource {
                 None => format!("DESCRIBE TABLE {}", quote_ident_mysql(table)),
             },
             EngineKind::Mssql => {
-                let prefix = db
-                    .map(|d| format!("{}.", quote_ident_bracket(d)))
-                    .unwrap_or_default();
+                let prefix = db.map_or_default(|d| format!("{}.", quote_ident_bracket(d)));
                 format!(
                     "SELECT column_name, data_type, is_nullable, column_default \
                      FROM {prefix}information_schema.columns WHERE table_name = {} \
@@ -576,22 +572,16 @@ async fn clickhouse_collect(
     let parsed: serde_json::Value = serde_json::from_str(&text).with_context(
         || "parse clickhouse JSONCompact response (does the query already contain a FORMAT clause?)",
     )?;
-    let columns = parsed["meta"]
-        .as_array()
-        .map(|m| {
-            m.iter()
-                .map(|c| c["name"].as_str().unwrap_or_default().to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-    let rows = parsed["data"]
-        .as_array()
-        .map(|d| {
-            d.iter()
-                .map(|row| row.as_array().cloned().unwrap_or_default())
-                .collect()
-        })
-        .unwrap_or_default();
+    let columns = parsed["meta"].as_array().map_or_default(|m| {
+        m.iter()
+            .map(|c| c["name"].as_str().unwrap_or_default().to_string())
+            .collect()
+    });
+    let rows = parsed["data"].as_array().map_or_default(|d| {
+        d.iter()
+            .map(|row| row.as_array().cloned().unwrap_or_default())
+            .collect()
+    });
     Ok((columns, rows))
 }
 

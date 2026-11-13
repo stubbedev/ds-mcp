@@ -130,7 +130,7 @@ async fn serve(
         ),
         (Some(_), None) => {}
     }
-    let http_cfg = cfg.as_ref().map(|c| c.http.clone()).unwrap_or_default();
+    let http_cfg = cfg.as_ref().map_or_default(|c| c.http.clone());
     let global = cfg.map(|c| Arc::new(registry::Registry::new(c, read_only)));
     let resolver = Arc::new(registry::Resolver::new(global, read_only));
     let server = tools::DsServer::new(Arc::clone(&resolver));

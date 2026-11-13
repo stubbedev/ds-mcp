@@ -194,11 +194,7 @@ impl MongoSource {
         cap: Option<usize>,
     ) -> Result<Value> {
         let db = self.db(database).await?;
-        let name = cmd
-            .keys()
-            .next()
-            .map(|k| k.to_ascii_lowercase())
-            .unwrap_or_default();
+        let name = cmd.keys().next().map_or_default(|k| k.to_ascii_lowercase());
         match (cap, name.as_str()) {
             (Some(limit), "find") => {
                 cmd.insert("limit", fetch_limit(limit));
