@@ -78,7 +78,6 @@ pub enum EngineKind {
     MariaDb,
     Postgres,
     Sqlite,
-    DuckDb,
     Mssql,
     ClickHouse,
     Redis,
@@ -96,7 +95,6 @@ impl EngineKind {
             Self::MariaDb => "mariadb",
             Self::Postgres => "postgres",
             Self::Sqlite => "sqlite",
-            Self::DuckDb => "duckdb",
             Self::Mssql => "mssql",
             Self::ClickHouse => "clickhouse",
             Self::Redis => "redis",
@@ -136,7 +134,7 @@ pub struct SourceConfig {
     /// expansion.
     pub api_key: Option<String>,
     pub database: Option<String>,
-    /// Database file path (sqlite/duckdb only). Supports `~` expansion.
+    /// Database file path (sqlite only). Supports `~` expansion.
     pub path: Option<String>,
     /// Default database for document tools (mongodb only).
     pub default_database: Option<String>,
@@ -344,7 +342,7 @@ pub fn default_path_global() -> Option<PathBuf> {
 /// happened to launch it. So a per-repo `.ds-mcp.json` + `.env` keep secrets
 /// out of the committed config, but a global `~/.config/ds-mcp/config.json`
 /// reads `~/.config/ds-mcp/.env`, not the repo's. Relative paths inside the
-/// config (sqlite/duckdb `path`, ssh key files) resolve against the config
+/// config (sqlite `path`, ssh key files) resolve against the config
 /// file's directory for the same reason.
 pub fn load(path: &Path) -> Result<Config> {
     let raw =
@@ -717,7 +715,7 @@ fn validate(cfg: &Config) -> Result<()> {
 
 fn validate_source(src: &SourceConfig) -> Result<()> {
     match src.engine {
-        EngineKind::Sqlite | EngineKind::DuckDb => {
+        EngineKind::Sqlite => {
             if src.path.is_none() && src.dsn.is_none() {
                 bail!("{} needs `path`", src.engine.name());
             }
@@ -736,8 +734,8 @@ fn validate_source(src: &SourceConfig) -> Result<()> {
             }
         }
     }
-    if !matches!(src.engine, EngineKind::Sqlite | EngineKind::DuckDb) && src.path.is_some() {
-        bail!("`path` is only for file engines (sqlite, duckdb)");
+    if src.engine != EngineKind::Sqlite && src.path.is_some() {
+        bail!("`path` is sqlite-only");
     }
     if src.engine != EngineKind::MongoDb && src.default_database.is_some() {
         bail!("`default_database` is mongodb-only; use `database`");
@@ -800,6 +798,19 @@ mod tests {
     fn rejects_unknown_fields() {
         let err = parse(r#"{"sources":{},"nope":1}"#).unwrap_err();
         assert!(format!("{err:#}").contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn rejects_duckdb_engine() {
+        let err = parse(&minimal("duckdb", r#","path":"demo.duckdb""#)).unwrap_err();
+        assert!(format!("{err:#}").contains("duckdb"), "{err}");
+    }
+
+    #[test]
+    fn path_is_sqlite_only() {
+        assert!(parse(&minimal("sqlite", r#","path":"demo.db""#)).is_ok());
+        let err = parse(&minimal("mysql", r#","path":"demo.db""#)).unwrap_err();
+        assert!(format!("{err:#}").contains("sqlite-only"), "{err}");
     }
 
     #[test]

@@ -82,9 +82,8 @@ jobs:
           token: ${{ secrets.XILO_TOKEN }}
 
       # Push both paths. The deps layer is a build-time input, absent from the
-      # binary's runtime closure, so pushing the binary alone never carried it —
-      # which is why every run recompiled duckdb's bundled C++ engine (~15 min)
-      # from scratch. A failed push is not swallowed: it would leave every
+      # binary's runtime closure, so pushing the binary alone never carried it
+      # and every run recompiled the dependencies from scratch. A failed push is not swallowed: it would leave every
       # consumer rebuilding from source while the job still reported green.
       - name: Push to xilo cache
         if: github.ref == 'refs/heads/master'

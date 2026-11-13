@@ -3,7 +3,7 @@
   "name": "ds-mcp",
   "display_name": "DataStore",
   "version": "__VERSION__",
-  "description": "Query MySQL, PostgreSQL, SQLite, DuckDB, SQL Server, ClickHouse, MongoDB, Redis, Elasticsearch and Qdrant through one MCP tool set.",
+  "description": "Query MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse, MongoDB, Redis, Elasticsearch and Qdrant through one MCP tool set.",
   "long_description": "One MCP server for many databases. Five tools — list_sources, ping, schema, query, execute — cover every engine, and the query payload stays engine-native: SQL text for SQL engines, a runCommand document for MongoDB, a command array for Redis/Valkey.\n\nFill in the first connection below and it becomes a named source; the four extra slots add more databases the same way. Anything behind a bastion or inside a Docker container is reachable via the SSH and Docker settings on the first source.\n\nPast those slots there is no limit: point Config file at a ds-mcp config.json, or paste a whole sources object into Extra sources (JSON). Every source found is merged into one list (see https://github.com/stubbedev/ds-mcp#configure).\n\nRead-only and PII redaction are off by default; turn them on for anything pointing at production.",
   "author": {
     "name": "stubbedev",
@@ -24,7 +24,6 @@
     "mysql",
     "postgres",
     "sqlite",
-    "duckdb",
     "mssql",
     "clickhouse",
     "mongodb",
@@ -128,7 +127,7 @@
     "engine": {
       "type": "string",
       "title": "Engine",
-      "description": "mysql, mariadb, postgres, sqlite, duckdb, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant. Leave blank if you only use Config file or Extra sources.",
+      "description": "mysql, mariadb, postgres, sqlite, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant. Leave blank if you only use Config file or Extra sources.",
       "required": false
     },
     "source_name": {
@@ -147,7 +146,7 @@
     "host": {
       "type": "string",
       "title": "Host",
-      "description": "Defaults to 127.0.0.1. Leave blank when using a connection string, or for sqlite/duckdb.",
+      "description": "Defaults to 127.0.0.1. Leave blank when using a connection string, or for sqlite.",
       "required": false
     },
     "port": {
@@ -182,8 +181,8 @@
     },
     "path": {
       "type": "string",
-      "title": "Database file (sqlite / duckdb)",
-      "description": "Path to the .db / .duckdb file. ~ is expanded.",
+      "title": "Database file (sqlite)",
+      "description": "Path to the .db file. ~ is expanded.",
       "required": false
     },
     "api_key": {
@@ -300,7 +299,7 @@
     "s2_engine": {
       "type": "string",
       "title": "Source 2: engine",
-      "description": "Leave blank to skip this slot. mysql, mariadb, postgres, sqlite, duckdb, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant.",
+      "description": "Leave blank to skip this slot. mysql, mariadb, postgres, sqlite, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant.",
       "required": false
     },
     "s2_name": {
@@ -350,7 +349,7 @@
     },
     "s2_path": {
       "type": "string",
-      "title": "Source 2: database file (sqlite / duckdb)",
+      "title": "Source 2: database file (sqlite)",
       "required": false
     },
     "s2_readonly": {
@@ -368,7 +367,7 @@
     "s3_engine": {
       "type": "string",
       "title": "Source 3: engine",
-      "description": "Leave blank to skip this slot. mysql, mariadb, postgres, sqlite, duckdb, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant.",
+      "description": "Leave blank to skip this slot. mysql, mariadb, postgres, sqlite, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant.",
       "required": false
     },
     "s3_name": {
@@ -418,7 +417,7 @@
     },
     "s3_path": {
       "type": "string",
-      "title": "Source 3: database file (sqlite / duckdb)",
+      "title": "Source 3: database file (sqlite)",
       "required": false
     },
     "s3_readonly": {
@@ -436,7 +435,7 @@
     "s4_engine": {
       "type": "string",
       "title": "Source 4: engine",
-      "description": "Leave blank to skip this slot. mysql, mariadb, postgres, sqlite, duckdb, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant.",
+      "description": "Leave blank to skip this slot. mysql, mariadb, postgres, sqlite, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant.",
       "required": false
     },
     "s4_name": {
@@ -486,7 +485,7 @@
     },
     "s4_path": {
       "type": "string",
-      "title": "Source 4: database file (sqlite / duckdb)",
+      "title": "Source 4: database file (sqlite)",
       "required": false
     },
     "s4_readonly": {
@@ -504,7 +503,7 @@
     "s5_engine": {
       "type": "string",
       "title": "Source 5: engine",
-      "description": "Leave blank to skip this slot. mysql, mariadb, postgres, sqlite, duckdb, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant.",
+      "description": "Leave blank to skip this slot. mysql, mariadb, postgres, sqlite, mssql, clickhouse, redis, valkey, mongodb, elasticsearch, opensearch or qdrant.",
       "required": false
     },
     "s5_name": {
@@ -554,7 +553,7 @@
     },
     "s5_path": {
       "type": "string",
-      "title": "Source 5: database file (sqlite / duckdb)",
+      "title": "Source 5: database file (sqlite)",
       "required": false
     },
     "s5_readonly": {

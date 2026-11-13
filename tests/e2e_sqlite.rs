@@ -158,63 +158,6 @@ fn tool_result(responses: &[Value], id: u64) -> (String, bool) {
 }
 
 #[test]
-fn duckdb_end_to_end() {
-    let dir = std::env::temp_dir().join(format!("ds-mcp-e2e-duck-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let db = dir.join("demo.duckdb");
-    let _ = std::fs::remove_file(&db);
-    let db = db.to_str().unwrap();
-
-    let config = json!({
-        "sources": {"duck": {"engine": "duckdb", "path": db}}
-    })
-    .to_string();
-
-    let responses = run_session(
-        &config,
-        &[
-            call(
-                1,
-                "execute",
-                &json!({"source": "duck",
-                "query": "CREATE TABLE widgets(id INTEGER, name TEXT, price DECIMAL(8,2), added DATE)"}),
-            ),
-            call(
-                2,
-                "execute",
-                &json!({"source": "duck",
-                "query": "INSERT INTO widgets VALUES (1, 'sprocket', 9.95, DATE '2026-01-02')"}),
-            ),
-            call(
-                3,
-                "query",
-                &json!({"source": "duck",
-                "query": "SELECT id, name, price, added FROM widgets"}),
-            ),
-            call(4, "schema", &json!({"source": "duck"})),
-            call(
-                5,
-                "query",
-                &json!({"source": "duck", "query": "DROP TABLE widgets"}),
-            ),
-        ],
-    );
-
-    let (text, is_error) = tool_result(&responses, 3);
-    assert!(!is_error, "select failed: {text}");
-    let rs: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(rs["rows"][0][1], json!("sprocket"), "{text}");
-    assert_eq!(rs["rows"][0][2], json!("9.95"), "{text}");
-    assert_eq!(rs["rows"][0][3], json!("2026-01-02"), "{text}");
-
-    let (text, is_error) = tool_result(&responses, 4);
-    assert!(!is_error && text.contains("widgets"), "{text}");
-
-    let (_, is_error) = tool_result(&responses, 5);
-    assert!(is_error, "DROP via query must be rejected");
-}
-
-#[test]
 fn sqlite_end_to_end() {
     let dir = std::env::temp_dir().join(format!("ds-mcp-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

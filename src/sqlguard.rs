@@ -5,8 +5,8 @@
 
 use sqlparser::ast::Statement;
 use sqlparser::dialect::{
-    ClickHouseDialect, Dialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect,
-    PostgreSqlDialect, SQLiteDialect,
+    ClickHouseDialect, Dialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect,
+    SQLiteDialect,
 };
 use sqlparser::parser::Parser;
 
@@ -17,7 +17,6 @@ fn dialect(kind: EngineKind) -> Box<dyn Dialect> {
         EngineKind::MySql | EngineKind::MariaDb => Box::new(MySqlDialect {}),
         EngineKind::Postgres => Box::new(PostgreSqlDialect {}),
         EngineKind::Sqlite => Box::new(SQLiteDialect {}),
-        EngineKind::DuckDb => Box::new(DuckDbDialect {}),
         EngineKind::Mssql => Box::new(MsSqlDialect {}),
         EngineKind::ClickHouse => Box::new(ClickHouseDialect {}),
         // unreachable in practice (non-SQL engines never parse SQL)
@@ -61,7 +60,7 @@ pub fn ensure_read_only(kind: EngineKind, sql: &str) -> Result<(), String> {
 fn ensure_stmt_read_only(stmt: &Statement) -> Result<(), String> {
     match stmt {
         Statement::Query(q) => ensure_query_read_only(q),
-        // EXPLAIN ANALYSE actually runs its inner statement (Postgres, DuckDB,
+        // EXPLAIN ANALYSE actually runs its inner statement (Postgres,
         // MySQL 8), and a parenthesised `(ANALYZE)` may not set the `analyze`
         // flag — so recurse unconditionally: the inner statement must itself be
         // read-only. Plain EXPLAIN of a write is rejected too (safe direction).

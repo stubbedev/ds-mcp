@@ -5,7 +5,7 @@ clients over stdio or streamable HTTP, behind a single unified tool surface.
 
 | engines |
 |---|
-| SQL — MySQL/MariaDB, PostgreSQL, SQLite, DuckDB, SQL Server, ClickHouse |
+| SQL — MySQL/MariaDB, PostgreSQL, SQLite, SQL Server, ClickHouse |
 | documents — MongoDB |
 | key-value — Redis/Valkey |
 | search/vectors — Elasticsearch/OpenSearch, Qdrant |
@@ -143,8 +143,8 @@ generated [config.schema.json](config.schema.json).
 
 | source field | what |
 |---|---|
-| `engine` | `mysql` `mariadb` `postgres` `sqlite` `duckdb` `mssql` `clickhouse` `redis` `valkey` `mongodb` `elasticsearch` `opensearch` `qdrant` |
-| connection | discrete `host`/`port`/`user`/`password`/`database` or a full `dsn` (alias `uri`); `path` for sqlite/duckdb files; `api_key` for ES/OpenSearch/Qdrant; `default_database` for mongo |
+| `engine` | `mysql` `mariadb` `postgres` `sqlite` `mssql` `clickhouse` `redis` `valkey` `mongodb` `elasticsearch` `opensearch` `qdrant` |
+| connection | discrete `host`/`port`/`user`/`password`/`database` or a full `dsn` (alias `uri`); `path` for sqlite files; `api_key` for ES/OpenSearch/Qdrant; `default_database` for mongo |
 | `readonly` | refuse `execute`, gate `query` through the read classifier ([below](#readwrite-enforcement)) |
 | `pii` | redact matching values on the way out ([below](#redacting-sensitive-columns)) |
 | `description` | shown to the model so it picks the right source |
@@ -254,7 +254,7 @@ method or unparseable path is refused too.
 
 A `readonly` source (or `--read-only`) refuses `execute` outright. For defense
 in depth the flag is also pushed down to the connection where the engine
-supports it — sqlite/duckdb open the file read-only, postgres sets
+supports it — sqlite opens the file read-only, postgres sets
 `default_transaction_read_only`, mysql/mariadb open every pooled session with
 `SET SESSION TRANSACTION READ ONLY` (MySQL 5.6.5+/MariaDB 10.0+), clickhouse
 sets `readonly=2` — so a side-effecting function the parser can't see is

@@ -179,7 +179,7 @@ jobs:
           mkdir -p tap/Formula
           cat > tap/Formula/ds-mcp.rb <<EOF
           class DsMcp < Formula
-            desc "Multi-engine data-source MCP server (MySQL, Postgres, SQLite, DuckDB, MSSQL, ClickHouse, MongoDB, Redis)"
+            desc "Multi-engine data-source MCP server (MySQL, Postgres, SQLite, MSSQL, ClickHouse, MongoDB, Redis)"
             homepage "https://github.com/${GITHUB_REPOSITORY}"
             version "${version}"
             license "MIT"

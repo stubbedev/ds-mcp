@@ -40,7 +40,6 @@ connection-string = "0.2.0"
 deadpool = { version = "0.13.1", default-features = false, features = ["managed", "rt_tokio_1"] }
 dirs = "6.0.0"
 dotenvy = "0.15.7"
-duckdb = { version = "1.10504.0", features = ["bundled"] }
 futures-util = "0.3.32"
 http = "1.4.2"
 mongodb = "3.7.0"

@@ -147,7 +147,7 @@
           ]
         },
         "path": {
-          "description": "Database file path (sqlite/duckdb only). Supports `~` expansion.",
+          "description": "Database file path (sqlite only). Supports `~` expansion.",
           "type": [
             "string",
             "null"
@@ -204,7 +204,6 @@
         "mariadb",
         "postgres",
         "sqlite",
-        "duckdb",
         "mssql",
         "clickhouse",
         "redis",

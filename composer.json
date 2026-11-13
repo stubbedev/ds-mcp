@@ -1,6 +1,6 @@
 {
     "name": "stubbedev/ds-mcp",
-    "description": "DataStore MCP — one MCP server for MySQL/MariaDB, PostgreSQL, SQLite, DuckDB, SQL Server, ClickHouse, MongoDB, Redis/Valkey, Elasticsearch/OpenSearch and Qdrant (Rust, distributed as a prebuilt binary)",
+    "description": "DataStore MCP — one MCP server for MySQL/MariaDB, PostgreSQL, SQLite, SQL Server, ClickHouse, MongoDB, Redis/Valkey, Elasticsearch/OpenSearch and Qdrant (Rust, distributed as a prebuilt binary)",
     "type": "composer-plugin",
     "license": "MIT",
     "keywords": ["mcp", "model-context-protocol", "database", "mysql", "postgres", "sqlite", "mongodb", "redis"],

@@ -17,12 +17,6 @@
       fileset = lib.fileset.unions [
         ../Cargo.toml
         ../Cargo.lock
-        # Sets CXXSTDLIB_* so the cc crate does not add its own dynamic
-        # -lstdc++ for duckdb's bundled C++ engine; build.rs links it
-        # statically instead. Dropping it silently changes how the binary
-        # links.
-        ../.cargo
-        ../build.rs
         ../src
         ../tests
       ];
@@ -43,9 +37,8 @@
 
       # crane folds Cargo.toml and the ds-mcp entry of Cargo.lock into the
       # deps layer's dummy source, and both carry the version. Every
-      # `chore: bump to vX.Y.Z` would therefore recompile every dependency —
-      # including duckdb's bundled C++ engine — on the one commit that
-      # changes no dependency at all. So the dummy source drops the version
+      # `chore: bump to vX.Y.Z` would therefore recompile every dependency on
+      # the one commit that changes no dependency at all. So the dummy source drops the version
       # from the manifest and takes a lock whose ds-mcp entry says 0.0.0,
       # making a real Cargo.lock change the only thing that invalidates the
       # layer; the final build below still gets the true version. Both are

@@ -1,4 +1,4 @@
-//! SQL-family sources: mysql/mariadb, postgres, sqlite, duckdb, mssql, clickhouse.
+//! SQL-family sources: mysql/mariadb, postgres, sqlite, mssql, clickhouse.
 //! One lazily-connected pool per source; rows are decoded to JSON with a
 //! per-engine try-decode chain (sqlx has no generic runtime decode).
 
@@ -31,9 +31,6 @@ pub enum SqlPool {
     MySql(MySqlPool),
     Pg(PgPool),
     Sqlite(SqlitePool),
-    // ponytail: one connection behind a mutex — duckdb's API is sync and MCP
-    // traffic is low; add a real pool if it ever becomes the bottleneck.
-    DuckDb(std::sync::Arc<std::sync::Mutex<duckdb::Connection>>),
     Mssql(super::mssql::Pool),
     // ClickHouse speaks HTTP; no connection to pool.
     ClickHouse(ClickHouseHttp),
@@ -84,9 +81,8 @@ impl SqlSource {
             Some(SqlPool::Pg(p)) => p.close().await,
             Some(SqlPool::Sqlite(p)) => p.close().await,
             Some(SqlPool::Mssql(p)) => p.close(),
-            // duckdb's handle is dropped with the source and clickhouse is
-            // stateless HTTP; `None` means we never connected at all.
-            Some(SqlPool::DuckDb(_) | SqlPool::ClickHouse(_)) | None => {}
+            // clickhouse is stateless HTTP; `None` means we never connected at all.
+            Some(SqlPool::ClickHouse(_)) | None => {}
         }
     }
 
@@ -160,21 +156,6 @@ impl SqlSource {
                 // at the file level too.
                 let o = o.read_only(self.readonly);
                 SqlPool::Sqlite(opts(cfg).connect_lazy_with(o))
-            }
-            EngineKind::DuckDb => {
-                let path = cfg.path.clone().or_else(|| cfg.dsn.clone());
-                let path = path.ok_or_else(|| anyhow::anyhow!("duckdb needs path"))?;
-                let readonly = self.readonly;
-                let conn = tokio::task::spawn_blocking(move || {
-                    let mut config = duckdb::Config::default();
-                    if readonly {
-                        config = config.access_mode(duckdb::AccessMode::ReadOnly)?;
-                    }
-                    duckdb::Connection::open_with_flags(&path, config)
-                        .with_context(|| format!("open duckdb {path}"))
-                })
-                .await??;
-                SqlPool::DuckDb(std::sync::Arc::new(std::sync::Mutex::new(conn)))
             }
             EngineKind::Mssql => self.connect_mssql(&target_host, target_port).await?,
             EngineKind::ClickHouse => self.connect_clickhouse(&target_host, target_port).await?,
@@ -333,11 +314,6 @@ impl SqlSource {
                 )
                 .await?
             }
-            SqlPool::DuckDb(conn) => {
-                let conn = std::sync::Arc::clone(conn);
-                let sql = sql.to_owned();
-                tokio::task::spawn_blocking(move || duckdb_collect(&conn, &sql, fetch)).await??
-            }
             SqlPool::Mssql(p) => {
                 // Boxed: the deadpool checkout future is ~19KB, and it
                 // would otherwise sit inline in every caller of this fn.
@@ -380,21 +356,6 @@ impl SqlSource {
                 ExecResult {
                     rows_affected: r.rows_affected(),
                     last_insert_id: u64::try_from(r.last_insert_rowid()).ok(),
-                }
-            }
-            SqlPool::DuckDb(conn) => {
-                let conn = std::sync::Arc::clone(conn);
-                let sql = sql.to_owned();
-                let affected = tokio::task::spawn_blocking(move || {
-                    let conn = conn
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    conn.execute(&sql, [])
-                })
-                .await??;
-                ExecResult {
-                    rows_affected: affected as u64,
-                    last_insert_id: None,
                 }
             }
             SqlPool::Mssql(p) => {
@@ -445,7 +406,6 @@ impl SqlSource {
             EngineKind::Sqlite => {
                 "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name".into()
             }
-            EngineKind::DuckDb => "SHOW TABLES".into(),
             EngineKind::Mssql => {
                 let prefix = db.map_or_default(|d| format!("{}.", quote_ident_bracket(d)));
                 format!(
@@ -487,7 +447,6 @@ impl SqlSource {
                 )
             }
             EngineKind::Sqlite => format!("PRAGMA table_info({})", quote_ident_dq(table)),
-            EngineKind::DuckDb => format!("DESCRIBE {}", quote_ident_dq(table)),
             EngineKind::ClickHouse => match db {
                 Some(db) => format!(
                     "DESCRIBE TABLE {}.{}",
@@ -593,111 +552,6 @@ async fn clickhouse_exec(ch: &ClickHouseHttp, sql: &str) -> Result<()> {
         bail!("clickhouse: {}", text.trim());
     }
     Ok(())
-}
-
-// The guard is already scoped as tightly as the borrows allow: `stmt` and
-// `rows_iter` both hold a reference to it, so it cannot drop before the scan
-// ends.
-#[allow(clippy::significant_drop_tightening)]
-fn duckdb_collect(
-    conn: &std::sync::Mutex<duckdb::Connection>,
-    sql: &str,
-    fetch: usize,
-) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
-    let mut columns: Vec<String> = Vec::new();
-    let mut rows = Vec::new();
-    {
-        // Scoped: `stmt` and `rows_iter` borrow the guard, so the connection
-        // stays locked only for the duration of the scan.
-        let conn = conn
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut stmt = conn.prepare(sql)?;
-        let mut rows_iter = stmt.query([])?;
-        while let Some(row) = rows_iter.next()? {
-            if columns.is_empty() {
-                columns.clone_from(&row.as_ref().column_names());
-            }
-            rows.push(
-                (0..columns.len())
-                    .map(|i| {
-                        duckdb_value(
-                            row.get::<_, duckdb::types::Value>(i)
-                                .unwrap_or(duckdb::types::Value::Null),
-                        )
-                    })
-                    .collect(),
-            );
-            if rows.len() >= fetch {
-                break;
-            }
-        }
-    }
-    Ok((columns, rows))
-}
-
-fn duckdb_value(v: duckdb::types::Value) -> Value {
-    use duckdb::types::Value as D;
-    match v {
-        D::Null => Value::Null,
-        D::Boolean(b) => Value::Bool(b),
-        D::TinyInt(n) => Value::from(n),
-        D::SmallInt(n) => Value::from(n),
-        D::Int(n) => Value::from(n),
-        D::BigInt(n) => Value::from(n),
-        D::HugeInt(n) => Value::String(n.to_string()),
-        D::UTinyInt(n) => Value::from(n),
-        D::USmallInt(n) => Value::from(n),
-        D::UInt(n) => Value::from(n),
-        D::UBigInt(n) => Value::from(n),
-        D::Float(f) => num_f64(f64::from(f)),
-        D::Double(f) => num_f64(f),
-        D::Decimal(d) => Value::String(d.to_string()),
-        D::Text(s) | D::Enum(s) => Value::String(s),
-        D::Blob(b) => bytes_value(b),
-        D::Timestamp(unit, n) => {
-            match chrono::DateTime::from_timestamp_micros(to_micros(unit, n)) {
-                Some(ts) => Value::String(ts.naive_utc().to_string()),
-                None => Value::Null,
-            }
-        }
-        D::Date32(days) => chrono::NaiveDate::from_num_days_from_ce_opt(days + 719_163)
-            .map_or(Value::Null, |d| Value::String(d.to_string())),
-        D::Time64(unit, n) => {
-            let micros = to_micros(unit, n);
-            // A negative or out-of-day value is not a time; `from_...opt`
-            // would reject it anyway, so a failed conversion is the same NULL.
-            let seconds = u32::try_from(micros / 1_000_000);
-            let nanos = u32::try_from((micros % 1_000_000) * 1000);
-            match (seconds, nanos) {
-                (Ok(seconds), Ok(nanos)) => {
-                    chrono::NaiveTime::from_num_seconds_from_midnight_opt(seconds, nanos)
-                        .map_or(Value::Null, |t| Value::String(t.to_string()))
-                }
-                _ => Value::Null,
-            }
-        }
-        D::List(items) | D::Array(items) => {
-            Value::Array(items.into_iter().map(duckdb_value).collect())
-        }
-        D::Struct(map) => Value::Object(
-            map.iter()
-                .map(|(k, v)| (k.clone(), duckdb_value(v.clone())))
-                .collect(),
-        ),
-        D::Union(inner) => duckdb_value(*inner),
-        other => Value::String(format!("{other:?}")),
-    }
-}
-
-const fn to_micros(unit: duckdb::types::TimeUnit, n: i64) -> i64 {
-    use duckdb::types::TimeUnit;
-    match unit {
-        TimeUnit::Second => n.saturating_mul(1_000_000),
-        TimeUnit::Millisecond => n.saturating_mul(1_000),
-        TimeUnit::Microsecond => n,
-        TimeUnit::Nanosecond => n / 1_000,
-    }
 }
 
 async fn mssql_collect(

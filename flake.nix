@@ -10,8 +10,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     # crane builds the dependency crates as their own Cargo.lock-keyed
-    # derivation, so a source edit reuses them instead of recompiling
-    # libduckdb-sys' bundled C++ engine (~15 min of a ~25 min build).
+    # derivation, so a source edit reuses them instead of recompiling them.
     crane.url = "github:ipetkov/crane";
     flake-parts = {
       url = "github:hercules-ci/flake-parts";
