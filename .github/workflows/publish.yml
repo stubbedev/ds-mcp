@@ -18,8 +18,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
           - { os: macos-latest, target: aarch64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
@@ -35,8 +35,35 @@ jobs:
       # Saving anyway cost ~2.5 GB per release out of the repo's hard 10 GB
       # budget, evicting the master caches that the CI job actually hits.
 
+      # musl-gcc compiles the bundled C dependencies (SQLite, aws-lc, ring)
+      # for the static musl target.
+      - name: Install musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # macOS has no static libSystem, so it is the one target left dynamic.
+      - name: Verify static linking
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="target/${{ matrix.target }}/release"
+          if [ "${RUNNER_OS}" = Windows ]; then
+            if grep -aqiE 'vcruntime[0-9]+\.dll|api-ms-win-crt-' "${dir}/ds-mcp.exe"; then
+              echo "ds-mcp.exe imports the dynamic MSVC C runtime" >&2
+              exit 1
+            fi
+            exit 0
+          fi
+          if readelf -lW "${dir}/ds-mcp" | grep -q INTERP || readelf -dW "${dir}/ds-mcp" | grep -q NEEDED; then
+            echo "ds-mcp is dynamically linked:" >&2
+            readelf -lW -dW "${dir}/ds-mcp" >&2
+            exit 1
+          fi
+          file "${dir}/ds-mcp"
 
       - name: Package (unix)
         if: runner.os != 'Windows'
@@ -85,7 +112,7 @@ jobs:
           # Unpack into a scratch dir: dist/ is what gets attached to the
           # release, and bare binaries do not belong there.
           mkdir -p bin
-          for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+          for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
                    aarch64-apple-darwin; do
             tar -xzf "dist/ds-mcp_${GITHUB_REF_NAME}_${t}.tar.gz" -O > "bin/${t}"
           done
@@ -95,8 +122,8 @@ jobs:
             repo/packaging/mcpb/pack.sh "bin/$1" "$2" \
               "dist/ds-mcp_${GITHUB_REF_NAME}_$1.mcpb"
           }
-          pack x86_64-unknown-linux-gnu   linux
-          pack aarch64-unknown-linux-gnu  linux
+          pack x86_64-unknown-linux-musl   linux
+          pack aarch64-unknown-linux-musl  linux
           pack aarch64-apple-darwin       darwin
           repo/packaging/mcpb/pack.sh bin/x86_64-pc-windows-msvc.exe win32 \
             "dist/ds-mcp_${GITHUB_REF_NAME}_x86_64-pc-windows-msvc.mcpb"
@@ -193,11 +220,11 @@ jobs:
 
             on_linux do
               if Hardware::CPU.arm?
-                url "${base}/ds-mcp_${GITHUB_REF_NAME}_aarch64-unknown-linux-gnu.tar.gz"
-                sha256 "$(sum aarch64-unknown-linux-gnu)"
+                url "${base}/ds-mcp_${GITHUB_REF_NAME}_aarch64-unknown-linux-musl.tar.gz"
+                sha256 "$(sum aarch64-unknown-linux-musl)"
               else
-                url "${base}/ds-mcp_${GITHUB_REF_NAME}_x86_64-unknown-linux-gnu.tar.gz"
-                sha256 "$(sum x86_64-unknown-linux-gnu)"
+                url "${base}/ds-mcp_${GITHUB_REF_NAME}_x86_64-unknown-linux-musl.tar.gz"
+                sha256 "$(sum x86_64-unknown-linux-musl)"
               end
             end
 

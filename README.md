@@ -26,8 +26,10 @@ thin launchers around it. Both fetch the binary for your platform from the
 GitHub release matching the installed version at install time, verify it
 against the release checksums and place it inside the package; if that
 download did not happen (offline, or the Composer plugin was declined), the
-launcher fetches it on first run. Both cover linux-x64/arm64 (glibc), macOS
-arm64 and windows-x64. Set `DS_MCP_SKIP_DOWNLOAD=1` to skip the
+launcher fetches it on first run. Both cover linux-x64/arm64, macOS arm64
+and windows-x64. The Linux binaries are statically linked against musl, so
+they run on any distribution, NixOS and Alpine included, and the Windows
+binary carries its C runtime. Set `DS_MCP_SKIP_DOWNLOAD=1` to skip the
 install-time download, or `DS_MCP_BINARY` to run your own build instead.
 
 Each release's binary is downloaded once per user, into
