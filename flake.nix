@@ -3,8 +3,8 @@
 
   nixConfig = {
     # CI pushes every master build here; accept and skip the local rebuild.
-    extra-substituters = [ "https://nix.stubbe.dev/c/default/default" ];
-    extra-trusted-public-keys = [ "default:6uWvXutL9cXjV3lii+Ur5ff+ArQoG4kMBKNXWrIxhHg=" ];
+    extra-substituters = [ "https://xilos.dev/c/stubbedev/main" ];
+    extra-trusted-public-keys = [ "xilos.dev/stubbedev/main-1:397R6S49v/FSvP+mZ3HlKrVN1KXhgzHIEIHxA/UuG6Y=" ];
   };
 
   inputs = {
