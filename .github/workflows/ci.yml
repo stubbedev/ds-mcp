@@ -62,31 +62,17 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-            extra-substituters = https://xilos.dev/c/stubbedev/main
-            extra-trusted-public-keys = xilos.dev/stubbedev/main-1:397R6S49v/FSvP+mZ3HlKrVN1KXhgzHIEIHxA/UuG6Y=
-      # Build the binary and the dependency layer. --accept-flake-config
-      # honors the flake's own substituter (the extra_nix_config above sets the
-      # same one; this silences the untrusted-config warning).
-      - name: Build package + deps layer
-        run: |
-          nix build -L --accept-flake-config --print-out-paths \
-            '.#default' '.#deps' | tee /tmp/outpaths
-      - run: nix flake check --accept-flake-config
-
-      - name: setup xilo
-        if: github.ref == 'refs/heads/master'
-        uses: stubbedev/xilo@v1
+      - uses: stubbedev/xilo@v2
         with:
           url: https://xilos.dev
           cache: stubbedev/main
           token: ${{ secrets.XILO_TOKEN }}
-
-      # Push both paths. The deps layer is a build-time input, absent from the
-      # binary's runtime closure, so pushing the binary alone never carried it
-      # and every run recompiled the dependencies from scratch. A failed push is not swallowed: it would leave every
-      # consumer rebuilding from source while the job still reported green.
-      - name: Push to xilo cache
-        if: github.ref == 'refs/heads/master'
+      # Build the binary and the dependency layer. --accept-flake-config
+      # honors the flake's own substituter (the xilo step above sets the same
+      # one; this silences the untrusted-config warning).
+      - name: Build package + deps layer
         run: |
-          set -u
-          xilo push stubbedev/main $(cat /tmp/outpaths)
+          nix build -L --accept-flake-config \
+            '.#default' '.#deps'
+      - run: nix flake check --accept-flake-config
+
